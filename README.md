@@ -1,9 +1,12 @@
-# BallStatsAI — rilevamento e tracking delle persone
+# BallStatsAI — tracking dei giocatori e rilevamento della palla
 
 Questo progetto legge un video, usa **YOLOv8 Nano** di Ultralytics per trovare le
 persone. **ByteTrack** collega i rilevamenti tra fotogrammi e assegna un ID
 a ogni traccia. Il programma salva un video MP4 con rettangoli verdi ed etichette
 come `ID: 3`, oltre a un file JSON con le posizioni.
+La classe COCO **sports ball (32)** viene rilevata con gli stessi pesi YOLO:
+nel video appare con un cerchio rosso e l'etichetta **PALLA**; le sue posizioni
+sono salvate in un secondo JSON.
 Funziona sulla CPU: non serve una scheda grafica dedicata.
 
 YOLO rileva tutte le persone visibili, compresi arbitri, spettatori e panchine.
@@ -19,12 +22,12 @@ BallStatsAI/
 ├── requirements.txt             # Librerie necessarie
 ├── src/
 │   ├── __init__.py
-│   └── detection.py              # Lettura, ByteTrack e salvataggio video/JSON
+│   └── detection.py              # ByteTrack, rilevamento palla e salvataggio video/JSON
 ├── scripts/
 │   └── create_test_video.py      # Crea un piccolo video dimostrativo
 ├── data/                        # Inserisci qui i video originali
 ├── models/                      # Pesi YOLO scaricati automaticamente
-└── output/                      # Video con ID e tracce JSON
+└── output/                      # Video, tracks.json e ball_tracks.json
 ```
 
 I video, i modelli e l'ambiente virtuale sono esclusi da Git tramite `.gitignore`.
@@ -80,13 +83,58 @@ Copia il video nella cartella `data/`, per esempio con il nome `partita.mp4`.
 Esegui dalla cartella principale del progetto:
 
 ```bash
-python main.py --input data/partita.mp4 --output output/partita_rilevata.mp4 --tracks output/tracks.json
+python main.py --input data/partita.mp4 --output output/partita_rilevata.mp4 --tracks output/tracks.json --ball-tracks output/ball_tracks.json
 ```
 
-Il tracking è attivo automaticamente: non serve un'opzione per abilitarlo.
-Il vecchio comando senza `--tracks` continua a funzionare e salva le tracce in
-`output/tracks.json`. Per ogni nuova partita usa nomi di uscita diversi se vuoi
+Tracking e rilevamento della palla sono attivi automaticamente.
+Il vecchio comando continua a funzionare: senza opzioni aggiuntive salva i
+giocatori in `output/tracks.json` e la palla in `output/ball_tracks.json`.
+Non servono nuove dipendenze o un nuovo modello. Per ogni nuova partita usa nomi di uscita diversi se vuoi
 conservare i risultati precedenti: video e JSON esistenti vengono sovrascritti.
+
+### Come viene rilevata la palla
+
+Il tracking dei giocatori continua a usare `classes=[0]` e ByteTrack come prima.
+Una seconda istanza **degli stessi pesi YOLO** esegue `predict` con `classes=[32]`
+sul fotogramma originale, prima delle annotazioni. Questo mantiene indipendente
+lo stato del tracker dei giocatori. Non vengono scaricati pesi aggiuntivi, ma due
+passaggi di inferenza per fotogramma richiedono più tempo e RAM.
+
+Per la palla il programma disegna un cerchio rosso centrato sul rettangolo rilevato
+e scrive `PALLA`. In questo passo si tratta di **rilevamento**, senza un ID della
+palla, interpolazione o previsione della posizione quando non è visibile.
+La classe “sports ball” include anche palloni di altri sport: non distingue
+specificamente una palla da basket. Palle piccole, mosse o nascoste possono non
+essere rilevate dal modello COCO; sono possibili anche falsi positivi.
+
+La soglia della palla è separata da quella dei giocatori e vale `0.25` per default.
+Per cercare anche palle meno sicure, con più possibili falsi positivi:
+
+```bash
+python main.py --input data/partita.mp4 --ball-confidence 0.15
+```
+
+### Formato di `ball_tracks.json`
+
+Esempio illustrativo:
+
+```json
+[
+  {"frame": 0, "bbox": [300, 180, 320, 200], "confidence": 0.82},
+  {"frame": 2, "bbox": [310, 190, 330, 210], "confidence": 0.76}
+]
+```
+
+Gli indici `frame` partono da **0**, come nel JSON dei giocatori, e `bbox` contiene
+coordinate intere `[x1, y1, x2, y2]` in pixel sul video originale. `confidence`
+è un numero decimale con la fiducia YOLO, non una certezza che sia la palla da basket.
+Un fotogramma senza palla non produce elementi; se non viene rilevata nessuna palla
+nel video, il file contiene `[]`. Se ci sono più rilevamenti nello stesso frame,
+vengono tutti disegnati ed esportati: non viene scelto automaticamente il pallone
+di gioco. Il JSON viene scritto al termine dell'analisi e conserva i rilevamenti
+in memoria fino a quel momento, come quello dei giocatori. I due JSON devono
+avere percorsi diversi; il programma rifiuta di sovrapporre il JSON della palla
+agli altri file usati dall'analisi.
 
 ### Come funziona l'ID
 
@@ -144,7 +192,7 @@ il programma impedisce di usare lo stesso percorso del video originale.
 
 ```bash
 python scripts/create_test_video.py
-python main.py --input data/test_persone.mp4 --output output/test_rilevato.mp4 --tracks output/test_tracks.json
+python main.py --input data/test_persone.mp4 --output output/test_rilevato.mp4 --tracks output/test_tracks.json --ball-tracks output/test_ball_tracks.json
 ```
 
 Se il video di prova esiste già, salta `create_test_video.py` e riutilizzalo.
@@ -158,6 +206,9 @@ in movimento. Il risultato atteso è un MP4 con rettangoli ed ID attorno alle pe
 e un JSON nel quale le stesse persone mantengono l'ID fra i fotogrammi.
 Un numero di rilevamenti maggiore di 12 è normale: ogni persona viene contata
 di nuovo in ciascun fotogramma. Non è il numero di giocatori distinti.
+La foto dell'autobus non contiene una palla: è adatta a verificare i giocatori e
+il JSON vuoto della palla, ma per provare un rilevamento positivo serve una clip
+con un pallone visibile.
 
 Verifiche eseguite con Python 3.12 e la soglia predefinita `0.1`:
 
@@ -173,6 +224,15 @@ Verifiche eseguite con Python 3.12 e la soglia predefinita `0.1`:
 
 Queste prove controllano il funzionamento tecnico. Non misurano l'accuratezza
 durante una partita reale, che va verificata sul proprio video.
+
+Per la palla è stata verificata anche una clip di sei fotogrammi ottenuta dalla
+foto COCO `000000000368.jpg`, presente nel campione
+[COCO128 distribuito da Ultralytics](https://github.com/ultralytics/assets/releases/download/v0.0.0/coco128.zip).
+La foto contiene un pallone da calcio: la classe COCO è la stessa “sports ball”.
+YOLO ha rilevato il pallone in tutti e sei i fotogrammi; sono stati controllati
+schema del JSON, cerchi ed etichette rosse e leggibilità del video risultante.
+Questo prova il rilevamento della classe 32, senza misurare l'accuratezza su
+palle da basket durante una partita.
 
 ## Opzioni e problemi comuni
 
@@ -197,6 +257,8 @@ python main.py --input data/partita.mp4 --confidence 0.25
 - **Download del modello fallito:** verifica la connessione a GitHub e riprova.
 - **Video non leggibile:** prova a convertirlo in MP4 con codec H.264 e FPS costanti.
 - **Poche persone rilevate:** abbassa la soglia; persone piccole, nascoste o sfocate sono difficili da riconoscere.
+- **JSON della palla vuoto:** il modello non ha trovato “sports ball” sopra la soglia;
+  prova una clip con palla più grande e nitida o abbassa `--ball-confidence`.
 
 Questo è un prototipo didattico. Prima di distribuire un prodotto, consulta i
 [termini di licenza Ultralytics](https://www.ultralytics.com/license) per codice e modelli.
