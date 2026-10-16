@@ -1,4 +1,4 @@
-# BallStatsAI — tracking, palla e possesso stimato
+# BallStatsAI — tracking, possesso e tiri stimati
 
 Questo progetto legge un video, usa **YOLOv8 Nano** di Ultralytics per trovare le
 persone. **ByteTrack** collega i rilevamenti tra fotogrammi e assegna un ID
@@ -11,11 +11,14 @@ Se YOLO non trova la palla, un fallback OpenCV cerca una forma arancione circola
 Il giocatore con il centro più vicino alla palla, entro una soglia configurabile,
 viene evidenziato in **giallo** con `ID: 3 PALLA`. Un terzo JSON registra il
 possesso stimato per ogni fotogramma.
+Fornendo le coordinate di **un canestro fisso**, il programma cerca anche tiri
+verso quel ferro, mostra `TIRO!` con l'esito stimato e salva `shots.json`.
 Funziona sulla CPU: non serve una scheda grafica dedicata.
 
 YOLO rileva tutte le persone visibili, compresi arbitri, spettatori e panchine.
 Non distingue le squadre, non riconosce i nomi dei giocatori e non calcola ancora
-statistiche avanzate o canestri. Il possesso è una stima basata sulla vicinanza,
+statistiche avanzate o punteggi ufficiali. Tiri ed esiti sono stime dalla traiettoria
+in due dimensioni, senza riconoscimento certo del canestro. Il possesso è una stima basata sulla vicinanza,
 non un riconoscimento certo del controllo della palla. Un ID identifica una traccia nel video, non una
 persona riconosciuta per nome o numero di maglia.
 
@@ -29,11 +32,14 @@ BallStatsAI/
 │   ├── __init__.py
 │   ├── detection.py              # Analisi e salvataggio video/JSON
 │   ├── ball_color.py             # Fallback arancione con HSV e contorni
-│   └── possession.py             # Possesso basato sulla distanza fra i centri
+│   ├── possession.py             # Possesso basato sulla distanza fra i centri
+│   └── shots.py                  # Candidati tiri e attraversamento del ferro
 ├── scripts/
 │   ├── create_test_video.py      # Crea un piccolo video dimostrativo
 │   ├── test_possession.py        # Test del calcolo del possesso
-│   └── test_ball_color.py        # Test del fallback colore
+│   ├── test_ball_color.py        # Test del fallback colore
+│   ├── test_shots.py             # Test delle traiettorie di tiro
+│   └── test_shots_integration.py # Test di video, JSON e annotazioni dei tiri
 ├── data/                        # Inserisci qui i video originali
 ├── models/                      # Pesi YOLO scaricati automaticamente
 └── output/                      # Video e JSON di giocatori, palla e possesso
@@ -92,15 +98,106 @@ Copia il video nella cartella `data/`, per esempio con il nome `partita.mp4`.
 Esegui dalla cartella principale del progetto:
 
 ```bash
-python main.py --input data/partita.mp4 --output output/partita_rilevata.mp4 --tracks output/tracks.json --ball-tracks output/ball_tracks.json --possession-output output/possession.json --possession-threshold 150
+python main.py --input data/partita.mp4 --output output/partita_rilevata.mp4 --tracks output/tracks.json --ball-tracks output/ball_tracks.json --possession-output output/possession.json --possession-threshold 150 --hoop-bbox "150,100,210,125"
 ```
 
-Tracking, rilevamento della palla e possesso sono attivi automaticamente.
-Il vecchio comando continua a funzionare: senza opzioni aggiuntive salva i
+**Da questa versione devi aggiungere `--hoop-bbox` anche ai vecchi comandi.**
+Le coordinate `150,100,210,125` negli esempi sono illustrative: sostituiscile con
+quelle del tuo canestro. Tracking, palla, possesso e tiri sono attivi automaticamente.
+Senza opzioni per i percorsi, il programma salva i
 giocatori in `output/tracks.json`, la palla in `output/ball_tracks.json` e il possesso
-in `output/possession.json`, con soglia di 150 pixel.
+in `output/possession.json`, con soglia di 150 pixel, e i tiri in `output/shots.json`.
 Non servono nuove dipendenze o un nuovo modello. Per ogni nuova partita usa nomi di uscita diversi se vuoi
 conservare i risultati precedenti: video e JSON esistenti vengono sovrascritti.
+
+### Specificare il canestro e rilevare i tiri
+
+`--hoop-bbox "x1,y1,x2,y2"` è **obbligatorio**: indica un piccolo rettangolo attorno
+al **ferro e alla sua apertura**, non all'intero tabellone. Usa pixel del video
+originale, senza ridimensionarlo: `(x1,y1)` è l'angolo superiore sinistro e
+`(x2,y2)` quello inferiore destro. Le coordinate devono essere intere, non negative,
+ordinate e comprese nelle dimensioni del video. L'origine è in alto a sinistra.
+Il rettangolo resta fisso per tutto il video e riguarda un solo canestro.
+
+Per ricavare le coordinate, puoi esportare il primo frame dalla cartella principale:
+
+```bash
+python -c "import cv2; v=cv2.VideoCapture('data/partita.mp4'); ok,f=v.read(); assert ok, 'Video non leggibile'; cv2.imwrite('output/primo_frame.jpg',f); v.release()"
+```
+
+Apri `output/primo_frame.jpg` in un editor che mostri le coordinate in pixel, ad
+esempio Paint su Windows. Individua i due angoli attorno al ferro nella foto alla
+risoluzione originale. Riporta quei valori nel comando, ad esempio:
+
+```bash
+python main.py --input data/partita.mp4 --hoop-bbox "150,100,210,125" --shot-output output/shots.json --min-shot-speed 5
+```
+
+Il programma disegna sempre un **cerchio verde** che racchiude il rettangolo del
+canestro. Controllalo nel video risultante per verificare le coordinate.
+
+La logica, in `src/shots.py`, usa gli stessi rilevamenti della palla e il possesso
+già calcolati in memoria; non legge i JSON di un'analisi precedente:
+
+1. Cerca una salita della palla di almeno `--min-shot-speed` pixel per frame fra
+   **due osservazioni consecutive**. L'asse y cresce verso il basso, quindi una
+   diminuzione della y è una salita. La palla deve partire sotto il ferro.
+2. Richiede un possessore osservato nel quarto di secondo precedente e una
+   componente del movimento verso il centro del canestro. Controlla anche che il
+   movimento orizzontale non si allontani eccessivamente dal ferro. Quel possessore
+   viene fissato come tiratore per tutto il candidato; non cambia durante il volo.
+3. Mostra `TIRO! ID: ... - IN CORSO`. Un solo candidato può essere aperto alla volta.
+4. Stima **FATTO** quando il centro della palla attraversa dall'alto verso il basso
+   entrambi i bordi orizzontali del rettangolo, con x dentro il ferro. Fra due
+   rilevamenti consecutivi interpola linearmente gli attraversamenti: può così
+   gestire una palla che salta l'intera area fra due frame.
+5. Stima **SBAGLIATO** se la discesa osservata supera il bordo inferiore senza
+   attraversamento valido, oppure se la palla inizia a scendere sotto il ferro
+   senza averne raggiunto l'altezza (tiro corto). Mostra l'esito per circa due secondi
+   e attende mezzo secondo prima di consentire un nuovo candidato.
+
+Se la palla scompare per oltre un secondo, il candidato dura oltre tre secondi,
+oppure il video termina a metà tiro, l'esito resta **non osservabile**. Anche
+un'occlusione durante il passaggio nel canestro impedisce la conferma. Questi
+candidati vengono contati nel riepilogo del terminale ed **esclusi da `shots.json`**:
+il formato richiesto contiene soltanto un booleano e non può rappresentare un
+esito sconosciuto senza chiamarlo erroneamente sbagliato. Non vengono inventate
+velocità né attraversamenti attraverso frame mancanti.
+
+La velocità predefinita è `5` pixel/frame, non pixel/secondo: risoluzione e FPS
+cambiano la sensibilità. Abbassala per salite lente, alzala per ridurre candidati
+provocati dal rumore; sono accettati solo numeri finiti maggiori di zero.
+
+### Formato di `shots.json`
+
+Esempio illustrativo:
+
+```json
+[
+  {"frame": 120, "player_id": 7, "made": true, "shot_x": 420.0, "shot_y": 350.0, "distance": 265.2},
+  {"frame": 310, "player_id": 3, "made": false, "shot_x": 520.0, "shot_y": 410.0, "distance": 330.4}
+]
+```
+
+- `frame`: indice del rilascio stimato, a partire da zero; è il primo dei due
+  fotogrammi che mostrano la salita, non il frame in cui si conosce l'esito.
+- `player_id`: ID intero dell'ultimo possessore recente, mantenuto durante il tiro.
+- `made`: `true` per fatto stimato, `false` per sbagliato stimato.
+- `shot_x`, `shot_y`: centro della palla al rilascio stimato, in pixel originali.
+- `distance`: distanza euclidea da quel punto al centro del rettangolo del canestro,
+  in pixel. Non è la distanza del giocatore dal ferro in metri e non classifica
+  tiri da due o tre punti.
+
+Il file viene scritto alla fine dell'analisi riuscita e contiene `[]` se non ci
+sono tiri con esito classificabile. `--shot-output` deve indicare un `.json` con
+percorso diverso da tutti gli altri file dell'analisi.
+
+**Limiti:** un attraversamento in un'immagine 2D non prova che la palla sia passata
+dentro il ferro nello spazio. Passaggi alti, rimbalzi, falsi rilevamenti arancioni,
+scambi di palla selezionata o possessi errati possono generare candidati ed esiti
+sbagliati. Non sono riconosciuti automaticamente tabellone, rete o altri canestri.
+I candidati non osservabili sono esclusi: `shots.json` non è un conteggio completo
+dei tentativi. Verifica gli eventi sul video prima di usarli come statistiche.
 
 ### Come viene stimato il possesso
 
@@ -154,7 +251,7 @@ Il file contiene **un elemento per ogni fotogramma**, numerato da zero. Esempio:
 per essere più restrittivo senza cambiare le soglie di rilevamento:
 
 ```bash
-python main.py --input data/partita.mp4 --possession-threshold 100
+python main.py --input data/partita.mp4 --possession-threshold 100 --hoop-bbox "150,100,210,125"
 ```
 
 Il percorso `--possession-output` deve terminare in `.json` ed essere diverso da
@@ -181,7 +278,7 @@ La soglia della palla è separata da quella dei giocatori e vale `0.25` per defa
 Per cercare anche palle meno sicure, con più possibili falsi positivi:
 
 ```bash
-python main.py --input data/partita.mp4 --ball-confidence 0.15
+python main.py --input data/partita.mp4 --ball-confidence 0.15 --hoop-bbox "150,100,210,125"
 ```
 
 ### Fallback arancione: attivazione e range HSV
@@ -204,7 +301,7 @@ possono essere scartate da questi filtri.
 Per ripristinare il comportamento solo YOLO:
 
 ```bash
-python main.py --input data/partita.mp4 --no-use-color-fallback
+python main.py --input data/partita.mp4 --no-use-color-fallback --hoop-bbox "150,100,210,125"
 ```
 
 Non scrivere `--use-color-fallback False`: usa l'opzione negativa sopra.
@@ -212,7 +309,7 @@ Per il range personalizzato, passa **sei interi separati da spazi**, prima i tre
 minimi e poi i tre massimi. Il valore predefinito è:
 
 ```bash
-python main.py --input data/partita.mp4 --color-hsv-range 5 100 100 15 255 255
+python main.py --input data/partita.mp4 --color-hsv-range 5 100 100 15 255 255 --hoop-bbox "150,100,210,125"
 ```
 
 L'ordine è `H_MIN S_MIN V_MIN H_MAX S_MAX V_MAX`. Nella scala OpenCV:
@@ -324,7 +421,7 @@ il programma impedisce di usare lo stesso percorso del video originale.
 
 ```bash
 python scripts/create_test_video.py
-python main.py --input data/test_persone.mp4 --output output/test_rilevato.mp4 --tracks output/test_tracks.json --ball-tracks output/test_ball_tracks.json
+python main.py --input data/test_persone.mp4 --output output/test_rilevato.mp4 --tracks output/test_tracks.json --ball-tracks output/test_ball_tracks.json --hoop-bbox "150,100,210,125"
 ```
 
 Se il video di prova esiste già, salta `create_test_video.py` e riutilizzalo.
@@ -383,6 +480,17 @@ YOLO rileva già il pallone, il fallback non viene chiamato e i JSON di giocator
 palla e possesso restano identici alla versione precedente. Queste prove non
 stabiliscono quanto migliori il rilevamento nella propria partita.
 
+Per i tiri sono stati verificati fatto, sbagliato laterale, tiro corto, mancato
+possesso, salita troppo lenta, direzione opposta, occlusione, fine video e
+attraversamento completo fra due frame. Le prove di integrazione usano tracce
+controllate e controllano anche il video MP4, il cerchio verde, le etichette e
+gli eventi JSON. La suite completa comprende **28 test**, inclusi due tiri distinti
+con possessori diversi e recupero dell'osservazione prima dell'attraversamento.
+Una prova con YOLO reale
+su sei frame di palla ferma verifica inoltre zero tiri, video leggibile e JSON di
+giocatori, palla e possesso identici alla versione precedente. Sono prove tecniche,
+non una misura dell'accuratezza dei tiri sulla partita dell'utente.
+
 ## Opzioni e problemi comuni
 
 Per vedere tutte le opzioni:
@@ -398,7 +506,7 @@ soglie di associazione e conferma. Puoi alzare la soglia YOLO, ma rischi di perd
 persone poco visibili e interrompere le tracce:
 
 ```bash
-python main.py --input data/partita.mp4 --confidence 0.25
+python main.py --input data/partita.mp4 --confidence 0.25 --hoop-bbox "150,100,210,125"
 ```
 
 - **Video non trovato:** verifica nome e percorso; usa le virgolette se contengono spazi.
