@@ -1,4 +1,4 @@
-# BallStatsAI — tracking dei giocatori e rilevamento della palla
+# BallStatsAI — tracking, palla e possesso stimato
 
 Questo progetto legge un video, usa **YOLOv8 Nano** di Ultralytics per trovare le
 persone. **ByteTrack** collega i rilevamenti tra fotogrammi e assegna un ID
@@ -7,11 +7,15 @@ come `ID: 3`, oltre a un file JSON con le posizioni.
 La classe COCO **sports ball (32)** viene rilevata con gli stessi pesi YOLO:
 nel video appare con un cerchio rosso e l'etichetta **PALLA**; le sue posizioni
 sono salvate in un secondo JSON.
+Il giocatore con il centro più vicino alla palla, entro una soglia configurabile,
+viene evidenziato in **giallo** con `ID: 3 PALLA`. Un terzo JSON registra il
+possesso stimato per ogni fotogramma.
 Funziona sulla CPU: non serve una scheda grafica dedicata.
 
 YOLO rileva tutte le persone visibili, compresi arbitri, spettatori e panchine.
 Non distingue le squadre, non riconosce i nomi dei giocatori e non calcola ancora
-statistiche, possessi o canestri. Un ID identifica una traccia nel video, non una
+statistiche avanzate o canestri. Il possesso è una stima basata sulla vicinanza,
+non un riconoscimento certo del controllo della palla. Un ID identifica una traccia nel video, non una
 persona riconosciuta per nome o numero di maglia.
 
 ## Struttura
@@ -22,12 +26,14 @@ BallStatsAI/
 ├── requirements.txt             # Librerie necessarie
 ├── src/
 │   ├── __init__.py
-│   └── detection.py              # ByteTrack, rilevamento palla e salvataggio video/JSON
+│   ├── detection.py              # Analisi e salvataggio video/JSON
+│   └── possession.py             # Possesso basato sulla distanza fra i centri
 ├── scripts/
-│   └── create_test_video.py      # Crea un piccolo video dimostrativo
+│   ├── create_test_video.py      # Crea un piccolo video dimostrativo
+│   └── test_possession.py        # Test del calcolo del possesso
 ├── data/                        # Inserisci qui i video originali
 ├── models/                      # Pesi YOLO scaricati automaticamente
-└── output/                      # Video, tracks.json e ball_tracks.json
+└── output/                      # Video e JSON di giocatori, palla e possesso
 ```
 
 I video, i modelli e l'ambiente virtuale sono esclusi da Git tramite `.gitignore`.
@@ -83,14 +89,72 @@ Copia il video nella cartella `data/`, per esempio con il nome `partita.mp4`.
 Esegui dalla cartella principale del progetto:
 
 ```bash
-python main.py --input data/partita.mp4 --output output/partita_rilevata.mp4 --tracks output/tracks.json --ball-tracks output/ball_tracks.json
+python main.py --input data/partita.mp4 --output output/partita_rilevata.mp4 --tracks output/tracks.json --ball-tracks output/ball_tracks.json --possession-output output/possession.json --possession-threshold 150
 ```
 
-Tracking e rilevamento della palla sono attivi automaticamente.
+Tracking, rilevamento della palla e possesso sono attivi automaticamente.
 Il vecchio comando continua a funzionare: senza opzioni aggiuntive salva i
-giocatori in `output/tracks.json` e la palla in `output/ball_tracks.json`.
+giocatori in `output/tracks.json`, la palla in `output/ball_tracks.json` e il possesso
+in `output/possession.json`, con soglia di 150 pixel.
 Non servono nuove dipendenze o un nuovo modello. Per ogni nuova partita usa nomi di uscita diversi se vuoi
 conservare i risultati precedenti: video e JSON esistenti vengono sovrascritti.
+
+### Come viene stimato il possesso
+
+Per ogni fotogramma il programma confronta il centro del rettangolo della palla
+con il centro del corpo di ciascun giocatore con ID. Calcola la distanza euclidea
+in pixel e seleziona il giocatore più vicino **solo se la distanza è inferiore**
+alla soglia: esattamente 150 pixel non basta con soglia 150. A parità di distanza
+mantiene il primo giocatore restituito dal tracker.
+
+Se YOLO rileva più palle, per il possesso viene usata quella con la fiducia maggiore
+(a parità, la prima restituita da YOLO). Il JSON della palla continua a conservarle
+tutte. Il possessore ha rettangolo ed etichetta gialli con `PALLA` accanto all'ID;
+gli altri giocatori restano verdi e la palla mantiene il cerchio rosso.
+
+Il calcolo usa in memoria le stesse posizioni esportate nei due JSON, senza
+modificare YOLO o ByteTrack. Per ottenere il nuovo video e il possesso, esegui
+nuovamente l'analisi sul video originale; questo comando non legge JSON precedenti.
+Non vengono mantenuti possessi tra frame senza palla o senza giocatori.
+
+La soglia dipende dalla risoluzione e dalla prospettiva della telecamera: non
+corrisponde a una distanza in metri. Durante un passaggio, un tiro o un rimbalzo
+il giocatore più vicino potrebbe non avere davvero il controllo della palla.
+Anche arbitri e spettatori rilevati come persone possono essere selezionati.
+Questo passo non calcola ancora durata del possesso o statistiche di squadra.
+
+### Formato di `possession.json`
+
+Il file contiene **un elemento per ogni fotogramma**, numerato da zero. Esempio:
+
+```json
+[
+  {"frame": 0, "player_id": 3, "ball_distance": 64.5, "confidence": 0.82},
+  {"frame": 1, "player_id": null, "ball_distance": 180.0, "confidence": 0.76},
+  {"frame": 2, "player_id": null, "ball_distance": -1.0, "confidence": 0.0}
+]
+```
+
+- `player_id`: ID del possessore stimato, oppure `null` se nessuno è abbastanza
+  vicino, la palla manca o non ci sono giocatori con ID.
+- `ball_distance`: distanza in pixel dal giocatore più vicino, anche se supera
+  la soglia. Vale **`-1.0`** quando non è misurabile perché manca palla o giocatore;
+  è un valore convenzionale da escludere dai calcoli delle distanze.
+- `confidence`: fiducia YOLO della palla scelta, **non probabilità di possesso**.
+  Vale `0.0` se non c'è una palla rilevata. Se manca il giocatore ma la palla è
+  presente, conserva la fiducia della palla e usa distanza `-1.0`.
+
+`--possession-threshold` accetta un numero finito maggiore di zero. Per esempio,
+per essere più restrittivo senza cambiare le soglie di rilevamento:
+
+```bash
+python main.py --input data/partita.mp4 --possession-threshold 100
+```
+
+Il percorso `--possession-output` deve terminare in `.json` ed essere diverso da
+quelli degli altri file dell'analisi. Anche questo JSON viene salvato soltanto
+al termine dell'analisi riuscita: interrompendo lo script, un eventuale file
+precedente non viene aggiornato.
 
 ### Come viene rilevata la palla
 
@@ -234,6 +298,13 @@ schema del JSON, cerchi ed etichette rosse e leggibilità del video risultante.
 Questo prova il rilevamento della classe 32, senza misurare l'accuratezza su
 palle da basket durante una partita.
 
+Per il possesso sono passati otto test della logica (vicinanza, soglia esatta,
+assenze, più palle e soglie non valide). Nella clip di sei fotogrammi sono stati
+verificati distanze, JSON e possessore giallo; i JSON di giocatori e palla sono
+identici a quelli della versione precedente. Una prova di otto fotogrammi con
+due frame neri intermedi ha verificato l'azzeramento del possessore durante
+l'assenza e la corrispondenza fra ID nel JSON, rettangolo giallo ed etichetta.
+
 ## Opzioni e problemi comuni
 
 Per vedere tutte le opzioni:
@@ -259,6 +330,15 @@ python main.py --input data/partita.mp4 --confidence 0.25
 - **Poche persone rilevate:** abbassa la soglia; persone piccole, nascoste o sfocate sono difficili da riconoscere.
 - **JSON della palla vuoto:** il modello non ha trovato “sports ball” sopra la soglia;
   prova una clip con palla più grande e nitida o abbassa `--ball-confidence`.
+- **Possesso spesso sconosciuto:** controlla prima i rilevamenti della palla e dei
+  giocatori. Aumentare `--possession-threshold` può assegnare più frame, ma anche
+  introdurre associazioni sbagliate.
+
+Per verificare la logica del possesso senza scaricare modelli o video:
+
+```bash
+python -m unittest discover -s scripts -p test_possession.py
+```
 
 Questo è un prototipo didattico. Prima di distribuire un prodotto, consulta i
 [termini di licenza Ultralytics](https://www.ultralytics.com/license) per codice e modelli.
