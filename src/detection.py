@@ -8,11 +8,13 @@ import cv2  # OpenCV legge, disegna e salva i fotogrammi del video.
 from ultralytics import YOLO  # YOLO riconosce gli oggetti nelle immagini.
 
 from src.possession import calcola_possesso  # Collega la palla al giocatore più vicino nello stesso frame.
+from src.ball_color import DEFAULT_HSV_RANGE, detect_ball_by_color, valida_range_hsv  # Recupera palle arancioni non trovate da YOLO.
 
 
 def rileva_persone(input_path, output_path, model_path, confidence=0.1, tracks_path="output/tracks.json",
                    ball_tracks_path="output/ball_tracks.json", ball_confidence=0.25,
-                   possession_path="output/possession.json", possession_threshold=150.0):
+                   possession_path="output/possession.json", possession_threshold=150.0,
+                   use_color_fallback=True, color_hsv_range=DEFAULT_HSV_RANGE):
     input_path = Path(input_path)  # Converte il percorso del video in un oggetto Path.
     output_path = Path(output_path)  # Converte il percorso del risultato.
     model_path = Path(model_path)  # Converte il percorso dei pesi del modello.
@@ -43,6 +45,7 @@ def rileva_persone(input_path, output_path, model_path, confidence=0.1, tracks_p
         raise ValueError("Il JSON del possesso deve essere diverso da tutti gli altri file dell'analisi.")
     if not math.isfinite(possession_threshold) or possession_threshold <= 0:  # Controlla anche le chiamate dirette alla funzione.
         raise ValueError("La soglia del possesso deve essere un numero finito maggiore di zero.")
+    valida_range_hsv(color_hsv_range)  # Controlla il range anche quando la funzione è chiamata senza main.py.
 
     video = cv2.VideoCapture(str(input_path))  # Apre il video di ingresso.
     writer = None  # Il video di uscita sarà aperto dopo aver letto il primo fotogramma.
@@ -93,13 +96,19 @@ def rileva_persone(input_path, output_path, model_path, confidence=0.1, tracks_p
             for box in risultato_palla.boxes:  # Salva tutte le palle rilevate, anche se nello stesso frame sono più di una.
                 x1, y1, x2, y2 = map(int, box.xyxy[0].tolist())  # Legge il rettangolo della palla in pixel.
                 fiducia = float(box.conf.item())  # Converte la fiducia YOLO in un numero utilizzabile nel JSON.
+                posizione = {"frame": fotogrammi, "bbox": [x1, y1, x2, y2], "confidence": fiducia}  # Stesso formato dei JSON precedenti.
+                palle_frame.append(posizione)  # Conserva prima i risultati YOLO, senza disegnare sul frame originale.
+            if not palle_frame and use_color_fallback:  # Usa il colore solo se nessuna palla supera --ball-confidence.
+                bbox_colore = detect_ball_by_color(frame, color_hsv_range)  # Analizza il frame originale, senza cerchi o etichette.
+                if bbox_colore is not None:
+                    palle_frame.append({"frame": fotogrammi, "bbox": bbox_colore, "confidence": 0.0, "source": "color"})  # Il colore non fornisce una probabilità YOLO.
+            for posizione in palle_frame:  # Disegna ed esporta allo stesso modo sia YOLO sia il fallback.
+                x1, y1, x2, y2 = posizione["bbox"]  # Legge il rettangolo del metodo selezionato.
                 centro = ((x1 + x2) // 2, (y1 + y2) // 2)  # Calcola il centro del rettangolo.
                 raggio = max(1, (max(x2 - x1, y2 - y1) + 1) // 2)  # Usa metà del lato più lungo come raggio.
                 cv2.circle(frame, centro, raggio, (0, 0, 255), 2)  # OpenCV usa BGR: questo colore è rosso.
                 cv2.putText(frame, "PALLA", (x1, max(20, y1 - 8)), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)  # Etichetta la palla.
-                posizione = {"frame": fotogrammi, "bbox": [x1, y1, x2, y2], "confidence": fiducia}  # Stesso indice frame dei giocatori, a partire da zero.
-                palle_frame.append(posizione)  # Offre i rilevamenti della palla al calcolo del possesso.
-                tracce_palla.append(posizione)  # Mantiene invariato il JSON separato della palla.
+                tracce_palla.append(posizione)  # Offre al JSON e al possesso anche le palle recuperate dal colore.
             possesso = calcola_possesso(giocatori_frame, palle_frame, fotogrammi, possession_threshold)  # Confronta i centri solo in questo frame.
             possessi.append(possesso)  # Registra anche i frame con possessore null.
             for giocatore in giocatori_frame:  # Disegna i giocatori dopo aver stabilito chi ha il possesso.
@@ -124,4 +133,6 @@ def rileva_persone(input_path, output_path, model_path, confidence=0.1, tracks_p
         json.dump(tracce_palla, file, indent=2)  # Se la palla non viene mai rilevata, il JSON contiene [].
     with possession_path.open("w", encoding="utf-8") as file:  # Salva un record per ogni frame al termine dell'analisi.
         json.dump(possessi, file, indent=2, allow_nan=False)  # Usa solo numeri JSON validi, senza NaN o Infinity.
+    recuperate = sum(posizione.get("source") == "color" for posizione in tracce_palla)  # Conta il contributo del fallback.
+    print(f"Palla: {len(tracce_palla) - recuperate} rilevamenti YOLO, {recuperate} recuperati dal colore.")  # Aiuta a confrontare i metodi sul proprio video.
     return fotogrammi, rilevamenti  # Restituisce il riepilogo al programma principale.

@@ -7,6 +7,7 @@ come `ID: 3`, oltre a un file JSON con le posizioni.
 La classe COCO **sports ball (32)** viene rilevata con gli stessi pesi YOLO:
 nel video appare con un cerchio rosso e l'etichetta **PALLA**; le sue posizioni
 sono salvate in un secondo JSON.
+Se YOLO non trova la palla, un fallback OpenCV cerca una forma arancione circolare.
 Il giocatore con il centro più vicino alla palla, entro una soglia configurabile,
 viene evidenziato in **giallo** con `ID: 3 PALLA`. Un terzo JSON registra il
 possesso stimato per ogni fotogramma.
@@ -27,10 +28,12 @@ BallStatsAI/
 ├── src/
 │   ├── __init__.py
 │   ├── detection.py              # Analisi e salvataggio video/JSON
+│   ├── ball_color.py             # Fallback arancione con HSV e contorni
 │   └── possession.py             # Possesso basato sulla distanza fra i centri
 ├── scripts/
 │   ├── create_test_video.py      # Crea un piccolo video dimostrativo
-│   └── test_possession.py        # Test del calcolo del possesso
+│   ├── test_possession.py        # Test del calcolo del possesso
+│   └── test_ball_color.py        # Test del fallback colore
 ├── data/                        # Inserisci qui i video originali
 ├── models/                      # Pesi YOLO scaricati automaticamente
 └── output/                      # Video e JSON di giocatori, palla e possesso
@@ -141,7 +144,10 @@ Il file contiene **un elemento per ogni fotogramma**, numerato da zero. Esempio:
   la soglia. Vale **`-1.0`** quando non è misurabile perché manca palla o giocatore;
   è un valore convenzionale da escludere dai calcoli delle distanze.
 - `confidence`: fiducia YOLO della palla scelta, **non probabilità di possesso**.
-  Vale `0.0` se non c'è una palla rilevata. Se manca il giocatore ma la palla è
+  Vale `0.0` se non c'è una palla rilevata **o se è stata recuperata dal colore**:
+  il fallback non produce una probabilità. Un possessore può quindi essere
+  assegnato anche con `confidence: 0.0`. Consulta `ball_tracks.json` per la fonte.
+  Se manca il giocatore ma la palla è
   presente, conserva la fiducia della palla e usa distanza `-1.0`.
 
 `--possession-threshold` accetta un numero finito maggiore di zero. Per esempio,
@@ -178,6 +184,58 @@ Per cercare anche palle meno sicure, con più possibili falsi positivi:
 python main.py --input data/partita.mp4 --ball-confidence 0.15
 ```
 
+### Fallback arancione: attivazione e range HSV
+
+Il fallback è **attivo per default** (`--use-color-fallback`). Se nel frame YOLO
+non restituisce nessuna palla sopra `--ball-confidence`, il programma esegue
+`detect_ball_by_color(frame)` sul fotogramma originale, prima di disegnare
+etichette e rettangoli. Anche una palla YOLO sotto soglia viene quindi sostituita
+dal tentativo a colori. Se YOLO trova almeno una palla, il colore non viene usato
+e non aggiunge duplicati. Il tracking dei giocatori resta invariato.
+
+OpenCV converte il frame da BGR a HSV, isola l'arancione con una maschera, rimuove
+piccoli puntini e cerca contorni rotondi. Scarta forme allungate, rettangoli e
+triangoli, aree inferiori a 20 pixel quadrati e superiori al 5% del fotogramma.
+Richiede circolarità di almeno `0.75` e rapporto larghezza/altezza fra `0.75` e
+`1.33`. Sceglie la forma più circolare (a parità, la più grande), oppure restituisce
+`None`. Palle molto piccole, sfocate, parzialmente nascoste o allungate dal movimento
+possono essere scartate da questi filtri.
+
+Per ripristinare il comportamento solo YOLO:
+
+```bash
+python main.py --input data/partita.mp4 --no-use-color-fallback
+```
+
+Non scrivere `--use-color-fallback False`: usa l'opzione negativa sopra.
+Per il range personalizzato, passa **sei interi separati da spazi**, prima i tre
+minimi e poi i tre massimi. Il valore predefinito è:
+
+```bash
+python main.py --input data/partita.mp4 --color-hsv-range 5 100 100 15 255 255
+```
+
+L'ordine è `H_MIN S_MIN V_MIN H_MAX S_MAX V_MAX`. Nella scala OpenCV:
+
+- **H** (tonalità): da 0 a 179; il range predefinito `5..15` cerca l'arancione.
+- **S** (saturazione): da 0 a 255; un minimo più alto esclude colori sbiaditi.
+- **V** (luminosità): da 0 a 255; un minimo più basso include oggetti più scuri.
+
+Se la palla non entra nella maschera per illuminazione o colore, prova un range
+più ampio, ad esempio `--color-hsv-range 3 80 70 22 255 255`. Per limitare falsi
+positivi, restringi H o aumenta i minimi S/V. Ogni minimo deve essere minore o
+uguale al relativo massimo; intervalli invertiti o fuori scala sono rifiutati.
+
+Le palle recuperate vengono mostrate con lo stesso **cerchio rosso e “PALLA”**,
+esportate nel JSON e usate anche per il possesso. Il terminale riporta separatamente
+quanti rilevamenti provengono da YOLO e quanti dal colore. Non viene interpolata
+una traiettoria nei frame in cui entrambi i metodi falliscono.
+
+Parquet, divise e altri oggetti arancioni rotondi possono essere scambiati per la
+palla. Confronta i video con e senza fallback, usando nomi di uscita diversi:
+più rilevamenti non significa necessariamente più rilevamenti corretti. Anche il
+possesso può risentire di questi falsi positivi.
+
 ### Formato di `ball_tracks.json`
 
 Esempio illustrativo:
@@ -192,6 +250,16 @@ Esempio illustrativo:
 Gli indici `frame` partono da **0**, come nel JSON dei giocatori, e `bbox` contiene
 coordinate intere `[x1, y1, x2, y2]` in pixel sul video originale. `confidence`
 è un numero decimale con la fiducia YOLO, non una certezza che sia la palla da basket.
+I record YOLO mantengono il formato precedente. Solo quelli recuperati dal colore
+aggiungono `"source": "color"` e usano `confidence: 0.0`, senza inventare una
+fiducia YOLO o una probabilità di correttezza. Esempio di fallback:
+
+```json
+{"frame": 3, "bbox": [300, 180, 320, 200], "confidence": 0.0, "source": "color"}
+```
+
+Per distinguere un recupero a colori dall'assenza di palla, controlla la presenza
+del record e il campo `source`, non soltanto `confidence`.
 Un fotogramma senza palla non produce elementi; se non viene rilevata nessuna palla
 nel video, il file contiene `[]`. Se ci sono più rilevamenti nello stesso frame,
 vengono tutti disegnati ed esportati: non viene scelto automaticamente il pallone
@@ -270,8 +338,9 @@ in movimento. Il risultato atteso è un MP4 con rettangoli ed ID attorno alle pe
 e un JSON nel quale le stesse persone mantengono l'ID fra i fotogrammi.
 Un numero di rilevamenti maggiore di 12 è normale: ogni persona viene contata
 di nuovo in ciascun fotogramma. Non è il numero di giocatori distinti.
-La foto dell'autobus non contiene una palla: è adatta a verificare i giocatori e
-il JSON vuoto della palla, ma per provare un rilevamento positivo serve una clip
+La foto dell'autobus non contiene una palla: in modalità solo YOLO è adatta a
+verificare i giocatori e il JSON vuoto della palla. Il fallback può invece
+selezionare altri oggetti arancioni; per provare un rilevamento positivo serve una clip
 con un pallone visibile.
 
 Verifiche eseguite con Python 3.12 e la soglia predefinita `0.1`:
@@ -305,6 +374,15 @@ identici a quelli della versione precedente. Una prova di otto fotogrammi con
 due frame neri intermedi ha verificato l'azzeramento del possessore durante
 l'assenza e la corrispondenza fra ID nel JSON, rettangolo giallo ed etichetta.
 
+Per il fallback sono passati anche i sei test del colore (14 test totali con
+quelli del possesso). Su una clip sintetica di sei fotogrammi con un disco
+arancione in movimento, il confronto con lo stesso YOLO ha prodotto **0 rilevamenti
+senza fallback e 6 con fallback**. Sono stati verificati centri dei rettangoli,
+cerchi rossi nel video decodificato e record `source: "color"`. Nel video in cui
+YOLO rileva già il pallone, il fallback non viene chiamato e i JSON di giocatori,
+palla e possesso restano identici alla versione precedente. Queste prove non
+stabiliscono quanto migliori il rilevamento nella propria partita.
+
 ## Opzioni e problemi comuni
 
 Per vedere tutte le opzioni:
@@ -328,8 +406,9 @@ python main.py --input data/partita.mp4 --confidence 0.25
 - **Download del modello fallito:** verifica la connessione a GitHub e riprova.
 - **Video non leggibile:** prova a convertirlo in MP4 con codec H.264 e FPS costanti.
 - **Poche persone rilevate:** abbassa la soglia; persone piccole, nascoste o sfocate sono difficili da riconoscere.
-- **JSON della palla vuoto:** il modello non ha trovato “sports ball” sopra la soglia;
-  prova una clip con palla più grande e nitida o abbassa `--ball-confidence`.
+- **JSON della palla vuoto:** YOLO non ha trovato “sports ball” sopra la soglia
+  e il fallback non ha trovato una forma valida. Prova una clip più nitida,
+  regola il range HSV oppure abbassa `--ball-confidence`.
 - **Possesso spesso sconosciuto:** controlla prima i rilevamenti della palla e dei
   giocatori. Aumentare `--possession-threshold` può assegnare più frame, ma anche
   introdurre associazioni sbagliate.
@@ -338,6 +417,13 @@ Per verificare la logica del possesso senza scaricare modelli o video:
 
 ```bash
 python -m unittest discover -s scripts -p test_possession.py
+```
+
+Per eseguire anche i test del colore (cerchio arancione, rumore, forme da escludere,
+selezione del candidato e range HSV personalizzati/non validi):
+
+```bash
+python -m unittest discover -s scripts -p "test_*.py"
 ```
 
 Questo è un prototipo didattico. Prima di distribuire un prodotto, consulta i

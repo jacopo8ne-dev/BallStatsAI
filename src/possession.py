@@ -12,7 +12,7 @@ def calcola_possesso(giocatori, palle, frame, soglia=150.0):
     if not palle:  # Senza palla non manteniamo il possessore del fotogramma precedente.
         return possesso
     palla = max(palle, key=lambda elemento: elemento["confidence"])  # Seleziona la palla con maggiore fiducia YOLO.
-    possesso["confidence"] = float(palla["confidence"])  # È la fiducia della palla, non una probabilità di possesso.
+    possesso["confidence"] = float(palla["confidence"])  # Fiducia YOLO, oppure 0.0 per il colore; non è una probabilità di possesso.
     if not giocatori:  # Non assegna la palla a una persona che il tracker non sta seguendo.
         return possesso
     x1, y1, x2, y2 = palla["bbox"]  # Legge il rettangolo della palla selezionata.

@@ -5,6 +5,7 @@ import math  # Verifica che la soglia del possesso sia un numero finito.
 from pathlib import Path  # Gestisce i percorsi dei file.
 
 from src.detection import rileva_persone  # Importa la funzione che analizza il video.
+from src.ball_color import valida_range_hsv  # Controlla gli intervalli di colore scelti dall'utente.
 
 
 def main():
@@ -19,6 +20,8 @@ def main():
     parser.add_argument("--model", type=Path, default=Path("models/yolov8n.pt"), help="Pesi del modello YOLOv8")
     parser.add_argument("--confidence", type=float, default=0.1, help="Soglia YOLO tra 0 e 1 (default: 0.1, adatta a ByteTrack)")
     parser.add_argument("--ball-confidence", type=float, default=0.25, help="Soglia della palla tra 0 e 1 (default: 0.25)")
+    parser.add_argument("--use-color-fallback", action=argparse.BooleanOptionalAction, default=True, help="Fallback arancione attivo per default; disattiva con --no-use-color-fallback")
+    parser.add_argument("--color-hsv-range", type=int, nargs=6, default=[5, 100, 100, 15, 255, 255], metavar=("H_MIN", "S_MIN", "V_MIN", "H_MAX", "S_MAX", "V_MAX"), help="Sei valori HSV: minimo e massimo (OpenCV)")
     args = parser.parse_args()  # Legge i valori forniti dall'utente.
     if not 0 < args.confidence <= 1:  # Impedisce di usare una soglia non valida.
         parser.error("--confidence deve essere maggiore di 0 e minore o uguale a 1.")
@@ -27,10 +30,13 @@ def main():
     if not math.isfinite(args.possession_threshold) or args.possession_threshold <= 0:  # Rifiuta anche NaN e infinito.
         parser.error("--possession-threshold deve essere un numero finito maggiore di zero.")
     try:  # Mostra un messaggio leggibile in caso di problemi con video o modello.
+        hsv_range = (args.color_hsv_range[:3], args.color_hsv_range[3:])  # Divide i sei valori nei due limiti HSV.
+        valida_range_hsv(hsv_range)  # Segnala subito un intervallo non valido.
         fotogrammi, rilevamenti = rileva_persone(
             args.input, args.output, args.model, args.confidence, args.tracks,
             ball_tracks_path=args.ball_tracks, ball_confidence=args.ball_confidence,
             possession_path=args.possession_output, possession_threshold=args.possession_threshold,
+            use_color_fallback=args.use_color_fallback, color_hsv_range=hsv_range,
         )  # Mantiene tracking e rilevamento della palla, aggiungendo il possesso per ogni frame.
     except (OSError, ValueError, RuntimeError) as errore:
         parser.exit(1, f"Errore: {errore}\n")  # Termina con un codice che segnala il problema.
