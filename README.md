@@ -1,61 +1,48 @@
-# BallStatsAI — tracking, possesso e tiri stimati
+# BallStatsAI — modello personalizzato per partite di basket
 
-Questo progetto legge un video, usa **YOLOv8 Nano** di Ultralytics per trovare le
-persone. **ByteTrack** collega i rilevamenti tra fotogrammi e assegna un ID
-a ogni traccia. Il programma salva un video MP4 con rettangoli verdi ed etichette
-come `ID: 3`, oltre a un file JSON con le posizioni.
-La classe COCO **sports ball (32)** viene rilevata con gli stessi pesi YOLO:
-nel video appare con un cerchio rosso e l'etichetta **PALLA**; le sue posizioni
-sono salvate in un secondo JSON.
-Se YOLO non trova la palla, un fallback OpenCV cerca una forma arancione circolare.
-Il giocatore con il centro più vicino alla palla, entro una soglia configurabile,
-viene evidenziato in **giallo** con `ID: 3 PALLA`. Un terzo JSON registra il
-possesso stimato per ogni fotogramma.
-Fornendo le coordinate di **un canestro fisso**, il programma cerca anche tiri
-verso quel ferro, mostra `TIRO!` con l'esito stimato e salva `shots.json`.
-Funziona sulla CPU: non serve una scheda grafica dedicata.
+Il progetto usa il tuo modello **`models/best.pt`** per riconoscere giocatori,
+palla e canestro. ByteTrack assegna un ID ai soli **Player**; la palla viene
+rilevata come **Ball** e il canestro come **Hoop**. Gli indici vengono ricavati
+ogni volta da `model.names`: non serve conoscere l'ordine delle classi.
 
-YOLO rileva tutte le persone visibili, compresi arbitri, spettatori e panchine.
-Non distingue le squadre, non riconosce i nomi dei giocatori e non calcola ancora
-statistiche avanzate o punteggi ufficiali. Tiri ed esiti sono stime dalla traiettoria
-in due dimensioni, senza riconoscimento certo del canestro. Il possesso è una stima basata sulla vicinanza,
-non un riconoscimento certo del controllo della palla. Un ID identifica una traccia nel video, non una
-persona riconosciuta per nome o numero di maglia.
+Le classi **Ref, Clock, Overlay e Scoreboard** vengono ignorate nel tracking e
+nell'esportazione. Le classi Player, Ball e Hoop devono essere presenti con questi
+nomi; se mancano, il programma mostra un messaggio che elenca quelle mancanti.
+`model.names` può essere sia un dizionario sia una lista.
+
+Il video risultante mostra rettangoli verdi e ID sui giocatori, un cerchio rosso
+con `PALLA` sul pallone e un cerchio verde sul canestro automatico. Il possessore
+stimato diventa giallo e i tiri vengono indicati con `TIRO!` ed esito stimato.
+Funziona sulla CPU, senza una scheda grafica dedicata.
 
 ## Struttura
 
 ```text
 BallStatsAI/
-├── main.py                      # Programma da eseguire
-├── requirements.txt             # Librerie necessarie
+├── main.py                       # Comando per avviare l'analisi
+├── requirements.txt              # Dipendenze Python
 ├── src/
 │   ├── __init__.py
-│   ├── detection.py              # Analisi e salvataggio video/JSON
-│   ├── ball_color.py             # Fallback arancione con HSV e contorni
-│   ├── possession.py             # Possesso basato sulla distanza fra i centri
-│   └── shots.py                  # Candidati tiri e attraversamento del ferro
-├── scripts/
-│   ├── create_test_video.py      # Crea un piccolo video dimostrativo
-│   ├── test_possession.py        # Test del calcolo del possesso
-│   ├── test_ball_color.py        # Test del fallback colore
-│   ├── test_shots.py             # Test delle traiettorie di tiro
-│   └── test_shots_integration.py # Test di video, JSON e annotazioni dei tiri
-├── data/                        # Inserisci qui i video originali
-├── models/                      # Pesi YOLO scaricati automaticamente
-└── output/                      # Video e JSON di giocatori, palla e possesso
+│   ├── detection.py              # Classi dinamiche, tracking, video e JSON
+│   ├── ball_color.py             # Fallback arancione quando manca Ball
+│   ├── possession.py             # Possesso basato sulla distanza
+│   └── shots.py                  # Canestro automatico e tiri stimati
+├── scripts/                      # Video dimostrativo e test
+├── data/                         # Video originali
+├── models/
+│   └── best.pt                   # Pesi personalizzati, distribuiti con Git LFS
+└── output/                       # Video annotato e quattro JSON
 ```
 
-I video, i modelli e l'ambiente virtuale sono esclusi da Git tramite `.gitignore`.
-Conserva una copia dei tuoi video originali.
+Video, nuovi modelli e ambiente virtuale sono esclusi da Git tramite `.gitignore`.
+Il file `models/best.pt` già presente nel repository è gestito con **Git LFS**.
+Conserva una copia dei video originali e del modello.
 
-## 1. Installa Python e le librerie
+## 1. Installazione
 
-Installa **Python 3.12** (versione verificata per questo progetto). Su Windows
-seleziona “Add Python to PATH” durante l'installazione. Apri un terminale nella
-cartella `BallStatsAI`, quella che contiene `main.py`.
-
-Crea un ambiente virtuale: è una cartella che tiene separate le librerie di questo
-progetto dalle altre installazioni di Python.
+Usa **Python 3.12**, la versione verificata per il codice del progetto. Su Windows
+seleziona “Add Python to PATH” durante l'installazione. Apri il terminale nella
+cartella che contiene `main.py`, poi crea l'ambiente virtuale:
 
 ```bash
 python -m venv .venv
@@ -67,472 +54,293 @@ Attivalo su Linux/macOS:
 source .venv/bin/activate
 ```
 
-Oppure su Windows, nel Prompt dei comandi (`cmd`):
+Oppure nel Prompt dei comandi Windows (`cmd`):
 
 ```bat
 .venv\Scripts\activate.bat
 ```
 
-Installa le dipendenze:
+Installa le librerie:
 
 ```bash
 python -m pip install -r requirements.txt
 ```
 
-Se avevi già installato il progetto, ripeti questo comando nell'ambiente attivo:
-ora include anche `lap`, la libreria usata da ByteTrack per associare i rilevamenti.
-
-In questo ambiente cloud Linux sono state usate le versioni CPU di PyTorch,
-installate **prima** di `requirements.txt` per evitare i pacchetti CUDA più grandi:
+Nel cloud Linux sono state usate le versioni CPU di PyTorch, installate prima di
+`requirements.txt` per evitare il download dei pacchetti CUDA:
 
 ```bash
 python -m pip install torch==2.6.0 torchvision==0.21.0 --index-url https://download.pytorch.org/whl/cpu
 python -m pip install -r requirements.txt
 ```
 
-Il primo download delle librerie e del modello richiede Internet e spazio su disco.
-
-## 2. Analizza la tua partita
-
-Copia il video nella cartella `data/`, per esempio con il nome `partita.mp4`.
-Esegui dalla cartella principale del progetto:
+Per scaricare il modello dal repository, installa [Git LFS](https://git-lfs.com/)
+e, dalla cartella del progetto, esegui:
 
 ```bash
-python main.py --input data/partita.mp4 --output output/partita_rilevata.mp4 --tracks output/tracks.json --ball-tracks output/ball_tracks.json --possession-output output/possession.json --possession-threshold 150 --hoop-bbox "150,100,210,125"
+git lfs install
+git lfs pull
 ```
 
-**Da questa versione devi aggiungere `--hoop-bbox` anche ai vecchi comandi.**
-Le coordinate `150,100,210,125` negli esempi sono illustrative: sostituiscile con
-quelle del tuo canestro. Tracking, palla, possesso e tiri sono attivi automaticamente.
-Senza opzioni per i percorsi, il programma salva i
-giocatori in `output/tracks.json`, la palla in `output/ball_tracks.json` e il possesso
-in `output/possession.json`, con soglia di 150 pixel, e i tiri in `output/shots.json`.
-Non servono nuove dipendenze o un nuovo modello. Per ogni nuova partita usa nomi di uscita diversi se vuoi
-conservare i risultati precedenti: video e JSON esistenti vengono sovrascritti.
+Il file completo occupa circa **173 MB**: un file di poche righe è solo il
+puntatore LFS, non i pesi. In alternativa copia il tuo file completo in
+**`models/best.pt`**. Lo script Python non scarica i pesi da solo.
+Il modello previsto riconosce
+Ball, Clock, Hoop, Overlay, Player, Ref e Scoreboard. L'ordine numerico può cambiare.
+Il caricamento dei pesi richiede che il file sia compatibile con la versione
+installata di Ultralytics; un file assente non viene sostituito con altri pesi.
 
-### Specificare il canestro e rilevare i tiri
+## 2. Analizza una partita
 
-`--hoop-bbox "x1,y1,x2,y2"` è **obbligatorio**: indica un piccolo rettangolo attorno
-al **ferro e alla sua apertura**, non all'intero tabellone. Usa pixel del video
-originale, senza ridimensionarlo: `(x1,y1)` è l'angolo superiore sinistro e
-`(x2,y2)` quello inferiore destro. Le coordinate devono essere intere, non negative,
-ordinate e comprese nelle dimensioni del video. L'origine è in alto a sinistra.
-Il rettangolo resta fisso per tutto il video e riguarda un solo canestro.
-
-Per ricavare le coordinate, puoi esportare il primo frame dalla cartella principale:
+Il comando minimo è:
 
 ```bash
-python -c "import cv2; v=cv2.VideoCapture('data/partita.mp4'); ok,f=v.read(); assert ok, 'Video non leggibile'; cv2.imwrite('output/primo_frame.jpg',f); v.release()"
+python main.py --input video.mp4
 ```
 
-Apri `output/primo_frame.jpg` in un editor che mostri le coordinate in pixel, ad
-esempio Paint su Windows. Individua i due angoli attorno al ferro nella foto alla
-risoluzione originale. Riporta quei valori nel comando, ad esempio:
+Se hai copiato il video in `data/partita.mp4`, usa:
 
 ```bash
-python main.py --input data/partita.mp4 --hoop-bbox "150,100,210,125" --shot-output output/shots.json --min-shot-speed 5
+python main.py --input data/partita.mp4 --output output/partita_analizzata.mp4
 ```
 
-Il programma disegna sempre un **cerchio verde** che racchiude il rettangolo del
-canestro. Controllalo nel video risultante per verificare le coordinate.
+Non servono coordinate manuali del canestro. Se il modello si trova altrove,
+indica il percorso con `--model percorso/best.pt`. Usa virgolette per i percorsi
+con spazi. L'analisi usa due istanze degli stessi pesi: una per ByteTrack sui
+Player, una per Ball e per la ricerca iniziale di Hoop. Le rilevazioni della
+palla e del canestro non modificano lo stato del tracker dei giocatori.
 
-La logica, in `src/shots.py`, usa gli stessi rilevamenti della palla e il possesso
-già calcolati in memoria; non legge i JSON di un'analisi precedente:
+I risultati predefiniti sono:
 
-1. Cerca una salita della palla di almeno `--min-shot-speed` pixel per frame fra
-   **due osservazioni consecutive**. L'asse y cresce verso il basso, quindi una
-   diminuzione della y è una salita. La palla deve partire sotto il ferro.
-2. Richiede un possessore osservato nel quarto di secondo precedente e una
-   componente del movimento verso il centro del canestro. Controlla anche che il
-   movimento orizzontale non si allontani eccessivamente dal ferro. Quel possessore
-   viene fissato come tiratore per tutto il candidato; non cambia durante il volo.
-3. Mostra `TIRO! ID: ... - IN CORSO`. Un solo candidato può essere aperto alla volta.
-4. Stima **FATTO** quando il centro della palla attraversa dall'alto verso il basso
-   entrambi i bordi orizzontali del rettangolo, con x dentro il ferro. Fra due
-   rilevamenti consecutivi interpola linearmente gli attraversamenti: può così
-   gestire una palla che salta l'intera area fra due frame.
-5. Stima **SBAGLIATO** se la discesa osservata supera il bordo inferiore senza
-   attraversamento valido, oppure se la palla inizia a scendere sotto il ferro
-   senza averne raggiunto l'altezza (tiro corto). Mostra l'esito per circa due secondi
-   e attende mezzo secondo prima di consentire un nuovo candidato.
+- `output/partita_rilevata.mp4`: video annotato, salvo diversa scelta con `--output`.
+- `output/tracks.json`: posizioni dei giocatori con ID.
+- `output/ball_tracks.json`: posizioni della palla.
+- `output/possession.json`: possesso stimato, un record per fotogramma.
+- `output/shots.json`: tiri con esito classificabile.
 
-Se la palla scompare per oltre un secondo, il candidato dura oltre tre secondi,
-oppure il video termina a metà tiro, l'esito resta **non osservabile**. Anche
-un'occlusione durante il passaggio nel canestro impedisce la conferma. Questi
-candidati vengono contati nel riepilogo del terminale ed **esclusi da `shots.json`**:
-il formato richiesto contiene soltanto un booleano e non può rappresentare un
-esito sconosciuto senza chiamarlo erroneamente sbagliato. Non vengono inventate
-velocità né attraversamenti attraverso frame mancanti.
+Aspetta il messaggio “Completato”, poi apri il video con un lettore come VLC.
+Non viene aperta una finestra durante l'elaborazione. Il programma mostra il
+progresso ogni 100 fotogrammi; su CPU, una partita lunga può richiedere tempo.
+Il video mantiene risoluzione e FPS dell'ingresso a frequenza costante, **senza
+l'audio**. La temporizzazione può differire per video a frequenza variabile.
 
-La velocità predefinita è `5` pixel/frame, non pixel/secondo: risoluzione e FPS
-cambiano la sensibilità. Abbassala per salite lente, alzala per ridurre candidati
-provocati dal rumore; sono accettati solo numeri finiti maggiori di zero.
+I file di uscita già presenti vengono sovrascritti: scegli nomi diversi per
+conservare analisi precedenti. I JSON vengono scritti alla fine dell'analisi
+riuscita. Interrompendo lo script il video può essere parziale e i vecchi JSON
+possono restare quelli dell'analisi precedente. Le tracce restano in memoria
+fino al salvataggio, quindi video lunghi richiedono più RAM.
 
-### Formato di `shots.json`
+## Canestro automatico
 
-Esempio illustrativo:
+`src/shots.py` cerca la classe **Hoop** nei primi **10 fotogrammi**, o in tutti
+quelli disponibili se il video è più corto. Usa una soglia di fiducia `0.25` e
+sceglie il rettangolo valido con la fiducia maggiore. La ricerca usa un piccolo
+buffer: i fotogrammi iniziali vengono poi elaborati dal frame zero, senza saltarli
+né duplicarli. Il cerchio verde compare già nel primo frame del video di uscita.
+
+La telecamera deve essere fissa. Dopo questa ricerca, il rettangolo viene
+**conservato per l'intera partita**: non viene cancellato se Hoop manca nei frame
+successivi e non oscilla con i nuovi rilevamenti. Se sono visibili più canestri,
+viene scelto un solo riferimento, quello con la fiducia più alta nella ricerca
+iniziale. Controlla che il cerchio verde corrisponda al canestro desiderato.
+
+Se nessun canestro viene trovato nei primi 10 frame, il programma segnala il
+problema e continua a elaborare giocatori, palla e possesso. In quel caso non
+disegna il cerchio del canestro e salva `shots.json` come `[]`. Non ricerca Hoop
+più avanti nel video: scegli una clip che mostri chiaramente il canestro all'inizio.
+
+Un frame senza Player, Ball o altre classi non interrompe l'analisi. I risultati
+assenti vengono gestiti come liste vuote; un canestro già individuato rimane
+comunque disponibile.
+
+## Tracking, palla e fallback arancione
+
+ByteTrack usa `persist=True` e il solo indice di **Player**. Gli ID sono locali
+al video e non identificano nomi, maglie o squadre. Occlusioni, incroci e mancate
+rilevazioni possono causare nuovi ID o scambi. Un giocatore senza ID confermato
+non viene esportato. I rilevamenti Ref non vengono trattati come giocatori,
+ma un'errata classificazione del modello come Player può comunque creare una traccia.
+
+La soglia dei Player è `--confidence 0.1`; quella della palla è separata,
+`--ball-confidence 0.25`. Una soglia più bassa può recuperare oggetti poco visibili,
+ma introduce più falsi positivi. Esempio:
+
+```bash
+python main.py --input data/partita.mp4 --ball-confidence 0.15
+```
+
+Quando nessun rilevamento Ball supera la soglia, il fallback OpenCV arancione è
+attivo per default. Cerca sul frame originale una forma circolare nel range HSV
+`[5,100,100]`–`[15,255,255]`. Scarta puntini, forme troppo squadrate o allungate,
+aree inferiori a 20 pixel quadrati o superiori al 5% del frame. Richiede circolarità
+almeno `0.75`, rapporto larghezza/altezza fra `0.75` e `1.33` e almeno sei vertici
+nel contorno approssimato. Sceglie il candidato più circolare, oppure nessuno.
+
+Per disattivarlo:
+
+```bash
+python main.py --input data/partita.mp4 --no-use-color-fallback
+```
+
+Per personalizzare l'HSV passa sei interi, in ordine
+`H_MIN S_MIN V_MIN H_MAX S_MAX V_MAX`:
+
+```bash
+python main.py --input data/partita.mp4 --color-hsv-range 3 80 70 22 255 255
+```
+
+In OpenCV H va da 0 a 179, S e V da 0 a 255. Allarga H per includere più tonalità,
+abbassa S per colori meno saturi o V per oggetti più scuri. Restringi gli intervalli
+per ridurre i falsi positivi. Ogni minimo deve essere minore o uguale al massimo.
+Usa `--no-use-color-fallback`, non `--use-color-fallback False`, per disattivarlo.
+
+Parquet, divise o altri oggetti arancioni possono essere scambiati per la palla.
+YOLO ha sempre la priorità: il colore non aggiunge duplicati nei frame con Ball.
+Il terminale conta separatamente i rilevamenti YOLO e i recuperi dal colore.
+
+## Possesso stimato
+
+Il centro della palla viene confrontato con il centro del corpo dei Player con ID
+nello stesso frame. Il più vicino ha il possesso se la distanza è **inferiore** a
+`--possession-threshold 150` pixel. A parità viene mantenuto il primo giocatore.
+Se ci sono più palle, viene scelta quella con la fiducia maggiore; a parità la
+prima. Il possessore diventa giallo con `PALLA` accanto all'ID.
+
+```bash
+python main.py --input data/partita.mp4 --possession-threshold 100
+```
+
+Senza palla o giocatori il possessore è sconosciuto: non viene mantenuto quello
+del frame precedente. La distanza in pixel dipende dalla prospettiva e dalla
+risoluzione. Passaggi, tiri e rimbalzi possono associare la palla a un giocatore
+che non la controlla davvero. Non vengono ancora calcolate durate o statistiche
+di squadra.
+
+## Tiri ed esiti stimati
+
+Quando un canestro è stato riconosciuto, il rilevatore cerca una salita della
+palla fra due osservazioni consecutive, di almeno `--min-shot-speed 5`
+pixel/frame. Richiede un possessore recente (entro un quarto di secondo), partenza
+sotto il canestro e una componente del movimento diretta verso il suo centro.
+Conserva quel giocatore come tiratore e mostra `TIRO! ... IN CORSO`.
+
+Stima **FATTO** se il centro della palla attraversa dall'alto verso il basso entrambi
+i bordi orizzontali del rettangolo Hoop, con x all'interno. Fra due osservazioni
+consecutive interpola linearmente l'attraversamento. Stima **SBAGLIATO** quando
+la discesa passa sotto il canestro senza un attraversamento valido, oppure quando
+un tiro corto torna a scendere senza raggiungere il ferro. L'esito rimane visibile
+per circa due secondi; dopo un esito attende mezzo secondo prima di un nuovo candidato.
+
+```bash
+python main.py --input data/partita.mp4 --min-shot-speed 5 --shot-output output/shots.json
+```
+
+La velocità è in pixel/frame: risoluzione e FPS cambiano la sensibilità. Sono
+accettati solo valori finiti maggiori di zero. L'analisi mantiene un solo tiro
+in corso alla volta. Se la palla scompare per oltre un secondo, il candidato dura
+oltre tre secondi o il video termina durante il tiro, l'esito resta non osservabile.
+Anche un'occlusione nel passaggio al ferro impedisce la conferma. Questi candidati
+sono contati nel terminale ed esclusi dal JSON booleano, senza inventare un errore
+al tiro. Non vengono calcolate velocità attraverso frame mancanti.
+
+Un passaggio in un rettangolo 2D non dimostra un canestro reale nello spazio.
+La qualità dipende anche da cosa il tuo modello ha imparato a delimitare come Hoop:
+un riquadro ampio attorno al tabellone rende meno precisa la regola di attraversamento.
+Falsi rilevamenti, possessi errati e passaggi alti possono generare tiri o esiti
+sbagliati. Verifica gli eventi sul video prima di usarli come statistiche.
+
+## Formato dei JSON
+
+Tutti i frame partono da **0** e tutte le coordinate sono in pixel sul video
+originale. `bbox` è `[x1,y1,x2,y2]`, dall'angolo superiore sinistro a quello inferiore
+destro. L'origine è in alto a sinistra. I percorsi dei JSON devono essere distinti
+fra loro e dagli altri file dell'analisi.
+
+`tracks.json`, un record per Player con ID in ciascun frame:
+
+```json
+[{"frame": 0, "id": 7, "bbox": [100,120,180,300]}]
+```
+
+`ball_tracks.json`, un record per Ball rilevata; nessun record nei frame senza palla:
 
 ```json
 [
-  {"frame": 120, "player_id": 7, "made": true, "shot_x": 420.0, "shot_y": 350.0, "distance": 265.2},
-  {"frame": 310, "player_id": 3, "made": false, "shot_x": 520.0, "shot_y": 410.0, "distance": 330.4}
+  {"frame": 0, "bbox": [300,180,320,200], "confidence": 0.82},
+  {"frame": 1, "bbox": [310,190,330,210], "confidence": 0.0, "source": "color"}
 ]
 ```
 
-- `frame`: indice del rilascio stimato, a partire da zero; è il primo dei due
-  fotogrammi che mostrano la salita, non il frame in cui si conosce l'esito.
-- `player_id`: ID intero dell'ultimo possessore recente, mantenuto durante il tiro.
-- `made`: `true` per fatto stimato, `false` per sbagliato stimato.
-- `shot_x`, `shot_y`: centro della palla al rilascio stimato, in pixel originali.
-- `distance`: distanza euclidea da quel punto al centro del rettangolo del canestro,
-  in pixel. Non è la distanza del giocatore dal ferro in metri e non classifica
-  tiri da due o tre punti.
+La fiducia è quella di YOLO. Solo i recuperi dal colore aggiungono `source: "color"`
+e usano `confidence: 0.0`: il metodo a colori non produce una probabilità.
+Tutte le Ball rilevate da YOLO vengono esportate, anche se sono più di una.
 
-Il file viene scritto alla fine dell'analisi riuscita e contiene `[]` se non ci
-sono tiri con esito classificabile. `--shot-output` deve indicare un `.json` con
-percorso diverso da tutti gli altri file dell'analisi.
-
-**Limiti:** un attraversamento in un'immagine 2D non prova che la palla sia passata
-dentro il ferro nello spazio. Passaggi alti, rimbalzi, falsi rilevamenti arancioni,
-scambi di palla selezionata o possessi errati possono generare candidati ed esiti
-sbagliati. Non sono riconosciuti automaticamente tabellone, rete o altri canestri.
-I candidati non osservabili sono esclusi: `shots.json` non è un conteggio completo
-dei tentativi. Verifica gli eventi sul video prima di usarli come statistiche.
-
-### Come viene stimato il possesso
-
-Per ogni fotogramma il programma confronta il centro del rettangolo della palla
-con il centro del corpo di ciascun giocatore con ID. Calcola la distanza euclidea
-in pixel e seleziona il giocatore più vicino **solo se la distanza è inferiore**
-alla soglia: esattamente 150 pixel non basta con soglia 150. A parità di distanza
-mantiene il primo giocatore restituito dal tracker.
-
-Se YOLO rileva più palle, per il possesso viene usata quella con la fiducia maggiore
-(a parità, la prima restituita da YOLO). Il JSON della palla continua a conservarle
-tutte. Il possessore ha rettangolo ed etichetta gialli con `PALLA` accanto all'ID;
-gli altri giocatori restano verdi e la palla mantiene il cerchio rosso.
-
-Il calcolo usa in memoria le stesse posizioni esportate nei due JSON, senza
-modificare YOLO o ByteTrack. Per ottenere il nuovo video e il possesso, esegui
-nuovamente l'analisi sul video originale; questo comando non legge JSON precedenti.
-Non vengono mantenuti possessi tra frame senza palla o senza giocatori.
-
-La soglia dipende dalla risoluzione e dalla prospettiva della telecamera: non
-corrisponde a una distanza in metri. Durante un passaggio, un tiro o un rimbalzo
-il giocatore più vicino potrebbe non avere davvero il controllo della palla.
-Anche arbitri e spettatori rilevati come persone possono essere selezionati.
-Questo passo non calcola ancora durata del possesso o statistiche di squadra.
-
-### Formato di `possession.json`
-
-Il file contiene **un elemento per ogni fotogramma**, numerato da zero. Esempio:
+`possession.json`, esattamente un record per frame:
 
 ```json
 [
-  {"frame": 0, "player_id": 3, "ball_distance": 64.5, "confidence": 0.82},
-  {"frame": 1, "player_id": null, "ball_distance": 180.0, "confidence": 0.76},
-  {"frame": 2, "player_id": null, "ball_distance": -1.0, "confidence": 0.0}
+  {"frame": 0, "player_id": 7, "ball_distance": 64.5, "confidence": 0.82},
+  {"frame": 1, "player_id": null, "ball_distance": -1.0, "confidence": 0.0}
 ]
 ```
 
-- `player_id`: ID del possessore stimato, oppure `null` se nessuno è abbastanza
-  vicino, la palla manca o non ci sono giocatori con ID.
-- `ball_distance`: distanza in pixel dal giocatore più vicino, anche se supera
-  la soglia. Vale **`-1.0`** quando non è misurabile perché manca palla o giocatore;
-  è un valore convenzionale da escludere dai calcoli delle distanze.
-- `confidence`: fiducia YOLO della palla scelta, **non probabilità di possesso**.
-  Vale `0.0` se non c'è una palla rilevata **o se è stata recuperata dal colore**:
-  il fallback non produce una probabilità. Un possessore può quindi essere
-  assegnato anche con `confidence: 0.0`. Consulta `ball_tracks.json` per la fonte.
-  Se manca il giocatore ma la palla è
-  presente, conserva la fiducia della palla e usa distanza `-1.0`.
+`player_id` è `null` se nessuno è abbastanza vicino o mancano palla o giocatori.
+`ball_distance` conserva la distanza dal più vicino anche oltre la soglia; vale
+`-1.0` se non misurabile. Escludi quel valore dai calcoli sulle distanze.
+`confidence` è la fiducia della palla scelta, non una probabilità di possesso:
+un possessore basato sul colore può avere `confidence: 0.0`.
 
-`--possession-threshold` accetta un numero finito maggiore di zero. Per esempio,
-per essere più restrittivo senza cambiare le soglie di rilevamento:
-
-```bash
-python main.py --input data/partita.mp4 --possession-threshold 100 --hoop-bbox "150,100,210,125"
-```
-
-Il percorso `--possession-output` deve terminare in `.json` ed essere diverso da
-quelli degli altri file dell'analisi. Anche questo JSON viene salvato soltanto
-al termine dell'analisi riuscita: interrompendo lo script, un eventuale file
-precedente non viene aggiornato.
-
-### Come viene rilevata la palla
-
-Il tracking dei giocatori continua a usare `classes=[0]` e ByteTrack come prima.
-Una seconda istanza **degli stessi pesi YOLO** esegue `predict` con `classes=[32]`
-sul fotogramma originale, prima delle annotazioni. Questo mantiene indipendente
-lo stato del tracker dei giocatori. Non vengono scaricati pesi aggiuntivi, ma due
-passaggi di inferenza per fotogramma richiedono più tempo e RAM.
-
-Per la palla il programma disegna un cerchio rosso centrato sul rettangolo rilevato
-e scrive `PALLA`. In questo passo si tratta di **rilevamento**, senza un ID della
-palla, interpolazione o previsione della posizione quando non è visibile.
-La classe “sports ball” include anche palloni di altri sport: non distingue
-specificamente una palla da basket. Palle piccole, mosse o nascoste possono non
-essere rilevate dal modello COCO; sono possibili anche falsi positivi.
-
-La soglia della palla è separata da quella dei giocatori e vale `0.25` per default.
-Per cercare anche palle meno sicure, con più possibili falsi positivi:
-
-```bash
-python main.py --input data/partita.mp4 --ball-confidence 0.15 --hoop-bbox "150,100,210,125"
-```
-
-### Fallback arancione: attivazione e range HSV
-
-Il fallback è **attivo per default** (`--use-color-fallback`). Se nel frame YOLO
-non restituisce nessuna palla sopra `--ball-confidence`, il programma esegue
-`detect_ball_by_color(frame)` sul fotogramma originale, prima di disegnare
-etichette e rettangoli. Anche una palla YOLO sotto soglia viene quindi sostituita
-dal tentativo a colori. Se YOLO trova almeno una palla, il colore non viene usato
-e non aggiunge duplicati. Il tracking dei giocatori resta invariato.
-
-OpenCV converte il frame da BGR a HSV, isola l'arancione con una maschera, rimuove
-piccoli puntini e cerca contorni rotondi. Scarta forme allungate, rettangoli e
-triangoli, aree inferiori a 20 pixel quadrati e superiori al 5% del fotogramma.
-Richiede circolarità di almeno `0.75` e rapporto larghezza/altezza fra `0.75` e
-`1.33`. Sceglie la forma più circolare (a parità, la più grande), oppure restituisce
-`None`. Palle molto piccole, sfocate, parzialmente nascoste o allungate dal movimento
-possono essere scartate da questi filtri.
-
-Per ripristinare il comportamento solo YOLO:
-
-```bash
-python main.py --input data/partita.mp4 --no-use-color-fallback --hoop-bbox "150,100,210,125"
-```
-
-Non scrivere `--use-color-fallback False`: usa l'opzione negativa sopra.
-Per il range personalizzato, passa **sei interi separati da spazi**, prima i tre
-minimi e poi i tre massimi. Il valore predefinito è:
-
-```bash
-python main.py --input data/partita.mp4 --color-hsv-range 5 100 100 15 255 255 --hoop-bbox "150,100,210,125"
-```
-
-L'ordine è `H_MIN S_MIN V_MIN H_MAX S_MAX V_MAX`. Nella scala OpenCV:
-
-- **H** (tonalità): da 0 a 179; il range predefinito `5..15` cerca l'arancione.
-- **S** (saturazione): da 0 a 255; un minimo più alto esclude colori sbiaditi.
-- **V** (luminosità): da 0 a 255; un minimo più basso include oggetti più scuri.
-
-Se la palla non entra nella maschera per illuminazione o colore, prova un range
-più ampio, ad esempio `--color-hsv-range 3 80 70 22 255 255`. Per limitare falsi
-positivi, restringi H o aumenta i minimi S/V. Ogni minimo deve essere minore o
-uguale al relativo massimo; intervalli invertiti o fuori scala sono rifiutati.
-
-Le palle recuperate vengono mostrate con lo stesso **cerchio rosso e “PALLA”**,
-esportate nel JSON e usate anche per il possesso. Il terminale riporta separatamente
-quanti rilevamenti provengono da YOLO e quanti dal colore. Non viene interpolata
-una traiettoria nei frame in cui entrambi i metodi falliscono.
-
-Parquet, divise e altri oggetti arancioni rotondi possono essere scambiati per la
-palla. Confronta i video con e senza fallback, usando nomi di uscita diversi:
-più rilevamenti non significa necessariamente più rilevamenti corretti. Anche il
-possesso può risentire di questi falsi positivi.
-
-### Formato di `ball_tracks.json`
-
-Esempio illustrativo:
+`shots.json`, un record per tiro con esito classificabile:
 
 ```json
-[
-  {"frame": 0, "bbox": [300, 180, 320, 200], "confidence": 0.82},
-  {"frame": 2, "bbox": [310, 190, 330, 210], "confidence": 0.76}
-]
+[{"frame": 120, "player_id": 7, "made": true, "shot_x": 420.0, "shot_y": 350.0, "distance": 265.2}]
 ```
 
-Gli indici `frame` partono da **0**, come nel JSON dei giocatori, e `bbox` contiene
-coordinate intere `[x1, y1, x2, y2]` in pixel sul video originale. `confidence`
-è un numero decimale con la fiducia YOLO, non una certezza che sia la palla da basket.
-I record YOLO mantengono il formato precedente. Solo quelli recuperati dal colore
-aggiungono `"source": "color"` e usano `confidence: 0.0`, senza inventare una
-fiducia YOLO o una probabilità di correttezza. Esempio di fallback:
+`frame` è il rilascio stimato, cioè il primo dei due frame di salita. `shot_x` e
+`shot_y` sono il centro della palla al rilascio; `distance` è la distanza da quel
+punto al centro di Hoop. Sono pixel, non metri, e non classificano tiri da due o
+tre punti. `made` è un esito stimato. Un canestro non riconosciuto o nessun tiro
+classificabile producono `[]`.
 
-```json
-{"frame": 3, "bbox": [300, 180, 320, 200], "confidence": 0.0, "source": "color"}
-```
-
-Per distinguere un recupero a colori dall'assenza di palla, controlla la presenza
-del record e il campo `source`, non soltanto `confidence`.
-Un fotogramma senza palla non produce elementi; se non viene rilevata nessuna palla
-nel video, il file contiene `[]`. Se ci sono più rilevamenti nello stesso frame,
-vengono tutti disegnati ed esportati: non viene scelto automaticamente il pallone
-di gioco. Il JSON viene scritto al termine dell'analisi e conserva i rilevamenti
-in memoria fino a quel momento, come quello dei giocatori. I due JSON devono
-avere percorsi diversi; il programma rifiuta di sovrapporre il JSON della palla
-agli altri file usati dall'analisi.
-
-### Come funziona l'ID
-
-YOLO trova le persone in ogni fotogramma. ByteTrack confronta posizioni e movimento
-con i fotogrammi precedenti e prova a riutilizzare lo stesso ID. Nel codice,
-`model.track(..., persist=True, tracker="bytetrack.yaml")` mantiene lo stato
-del tracker fra le chiamate consecutive. Ogni analisi crea un nuovo modello e un
-nuovo tracker: gli ID sono locali al video e non vanno confrontati fra partite.
-
-L'identità non è garantita: incroci, occlusioni, rilevamenti mancanti e uscite
-dall'inquadratura possono causare un nuovo ID o uno scambio. Il tracker non
-riconosce il volto o la maglia. Se una persona non riceve ancora un ID, non viene
-annotata né esportata fino all'assegnazione; nei fotogrammi senza persone il video
-continua normalmente. Non vengono esportate posizioni inventate durante le assenze.
-
-### Formato di `tracks.json`
-
-Il JSON è una lista, con un elemento per ogni persona con ID in ogni fotogramma.
-Esempio illustrativo:
-
-```json
-[
-  {"frame": 0, "id": 3, "bbox": [100, 120, 180, 300]},
-  {"frame": 1, "id": 3, "bbox": [102, 120, 182, 300]}
-]
-```
-
-- `frame`: indice intero del fotogramma, **a partire da 0**.
-- `id`: intero assegnato da ByteTrack, uguale all'etichetta nel video; può avere salti.
-- `bbox`: `[x1, y1, x2, y2]` in pixel sul video originale; angolo superiore sinistro
-  e angolo inferiore destro. L'origine `(0, 0)` è in alto a sinistra.
-
-La stessa persona compare in più elementi: il totale delle posizioni non è il
-numero di giocatori. Il JSON viene scritto al termine dell'analisi riuscita;
-senza tracce contiene `[]`. Le tracce sono conservate in memoria fino al salvataggio:
-video molto lunghi producono file più grandi e richiedono più RAM. Se interrompi
-l'elaborazione, il video può essere parziale e il JSON non viene aggiornato;
-un eventuale JSON precedente resta quello della vecchia analisi.
-
-Al primo avvio, Ultralytics scarica automaticamente `yolov8n.pt` in `models/` da
-GitHub. I successivi avvii riutilizzano il file. Se lavori senza rete, devi prima
-aver scaricato i pesi o indicare un modello YOLOv8 locale con `--model percorso/modello.pt`.
-
-Aspetta il messaggio “Completato”, poi apri il file in `output/` con un lettore
-video come VLC. Non appare una finestra durante l'elaborazione. Su CPU un video
-lungo può richiedere tempo: inizia con una clip breve. Viene mostrato un messaggio
-ogni 100 fotogrammi.
-
-Il video salvato mantiene risoluzione e FPS del video di ingresso a frequenza
-costante, **senza audio**. Per riprese a frequenza variabile, la temporizzazione
-può differire. Un file di uscita esistente con lo stesso nome viene sovrascritto;
-il programma impedisce di usare lo stesso percorso del video originale.
-
-## 3. Prova rapida senza un video personale
-
-```bash
-python scripts/create_test_video.py
-python main.py --input data/test_persone.mp4 --output output/test_rilevato.mp4 --tracks output/test_tracks.json --ball-tracks output/test_ball_tracks.json --hoop-bbox "150,100,210,125"
-```
-
-Se il video di prova esiste già, salta `create_test_video.py` e riutilizzalo.
-
-Lo script scarica la [foto dimostrativa di Ultralytics](https://github.com/ultralytics/assets/blob/main/im/bus.jpg)
-e la ripete in 12 fotogrammi (2 secondi, 6 FPS, 480 × 640).
-È una scena con persone e un autobus, non una partita: permette di controllare
-download, lettura video, rilevamento e scrittura senza un video personale.
-Le immagini sono ferme; questo test non verifica il comportamento su giocatori
-in movimento. Il risultato atteso è un MP4 con rettangoli ed ID attorno alle persone
-e un JSON nel quale le stesse persone mantengono l'ID fra i fotogrammi.
-Un numero di rilevamenti maggiore di 12 è normale: ogni persona viene contata
-di nuovo in ciascun fotogramma. Non è il numero di giocatori distinti.
-La foto dell'autobus non contiene una palla: in modalità solo YOLO è adatta a
-verificare i giocatori e il JSON vuoto della palla. Il fallback può invece
-selezionare altri oggetti arancioni; per provare un rilevamento positivo serve una clip
-con un pallone visibile.
-
-Verifiche eseguite con Python 3.12 e la soglia predefinita `0.1`:
-
-- Video dimostrativo: 12 fotogrammi, 48 posizioni, quattro ID stabili; JSON
-  verificato e MP4 riaperto con 12 fotogrammi annotati a 480 × 640 e 6 FPS.
-- Prova sintetica di 27 fotogrammi: foto, tre fotogrammi neri e foto traslata
-  di 5 pixel. I quattro ID sono stati recuperati dopo la breve assenza; nessuna
-  posizione è stata esportata nei fotogrammi neri. Le etichette disegnate
-  corrispondono agli ID del JSON.
-- Nuova analisi di un video senza persone: tre fotogrammi elaborati e JSON `[]`,
-  senza conservare le tracce dell'analisi precedente.
-- Percorsi delle tracce non validi rifiutati; dipendenze verificate con `pip check`.
-
-Queste prove controllano il funzionamento tecnico. Non misurano l'accuratezza
-durante una partita reale, che va verificata sul proprio video.
-
-Per la palla è stata verificata anche una clip di sei fotogrammi ottenuta dalla
-foto COCO `000000000368.jpg`, presente nel campione
-[COCO128 distribuito da Ultralytics](https://github.com/ultralytics/assets/releases/download/v0.0.0/coco128.zip).
-La foto contiene un pallone da calcio: la classe COCO è la stessa “sports ball”.
-YOLO ha rilevato il pallone in tutti e sei i fotogrammi; sono stati controllati
-schema del JSON, cerchi ed etichette rosse e leggibilità del video risultante.
-Questo prova il rilevamento della classe 32, senza misurare l'accuratezza su
-palle da basket durante una partita.
-
-Per il possesso sono passati otto test della logica (vicinanza, soglia esatta,
-assenze, più palle e soglie non valide). Nella clip di sei fotogrammi sono stati
-verificati distanze, JSON e possessore giallo; i JSON di giocatori e palla sono
-identici a quelli della versione precedente. Una prova di otto fotogrammi con
-due frame neri intermedi ha verificato l'azzeramento del possessore durante
-l'assenza e la corrispondenza fra ID nel JSON, rettangolo giallo ed etichetta.
-
-Per il fallback sono passati anche i sei test del colore (14 test totali con
-quelli del possesso). Su una clip sintetica di sei fotogrammi con un disco
-arancione in movimento, il confronto con lo stesso YOLO ha prodotto **0 rilevamenti
-senza fallback e 6 con fallback**. Sono stati verificati centri dei rettangoli,
-cerchi rossi nel video decodificato e record `source: "color"`. Nel video in cui
-YOLO rileva già il pallone, il fallback non viene chiamato e i JSON di giocatori,
-palla e possesso restano identici alla versione precedente. Queste prove non
-stabiliscono quanto migliori il rilevamento nella propria partita.
-
-Per i tiri sono stati verificati fatto, sbagliato laterale, tiro corto, mancato
-possesso, salita troppo lenta, direzione opposta, occlusione, fine video e
-attraversamento completo fra due frame. Le prove di integrazione usano tracce
-controllate e controllano anche il video MP4, il cerchio verde, le etichette e
-gli eventi JSON. La suite completa comprende **28 test**, inclusi due tiri distinti
-con possessori diversi e recupero dell'osservazione prima dell'attraversamento.
-Una prova con YOLO reale
-su sei frame di palla ferma verifica inoltre zero tiri, video leggibile e JSON di
-giocatori, palla e possesso identici alla versione precedente. Sono prove tecniche,
-non una misura dell'accuratezza dei tiri sulla partita dell'utente.
-
-## Opzioni e problemi comuni
-
-Per vedere tutte le opzioni:
+Puoi cambiare i percorsi con `--tracks`, `--ball-tracks`, `--possession-output` e
+`--shot-output`. Per tutte le opzioni:
 
 ```bash
 python main.py --help
 ```
 
-La soglia YOLO predefinita è ora `0.1` (prima era `0.35`): ByteTrack può usare
-anche rilevamenti meno sicuri per continuare tracce già esistenti. Non ogni
-rilevamento debole diventa una nuova traccia: ByteTrack applica anche le proprie
-soglie di associazione e conferma. Puoi alzare la soglia YOLO, ma rischi di perdere
-persone poco visibili e interrompere le tracce:
+## Test e problemi comuni
+
+Per eseguire i test della logica e dell'integrazione con rilevamenti controllati:
 
 ```bash
-python main.py --input data/partita.mp4 --confidence 0.25 --hoop-bbox "150,100,210,125"
+python -m unittest discover -s scripts -p "test_*.py" -v
 ```
 
-- **Video non trovato:** verifica nome e percorso; usa le virgolette se contengono spazi.
-- **Libreria non trovata:** attiva `.venv` e ripeti l'installazione.
-- **Download del modello fallito:** verifica la connessione a GitHub e riprova.
-- **Video non leggibile:** prova a convertirlo in MP4 con codec H.264 e FPS costanti.
-- **Poche persone rilevate:** abbassa la soglia; persone piccole, nascoste o sfocate sono difficili da riconoscere.
-- **JSON della palla vuoto:** YOLO non ha trovato “sports ball” sopra la soglia
-  e il fallback non ha trovato una forma valida. Prova una clip più nitida,
-  regola il range HSV oppure abbassa `--ball-confidence`.
-- **Possesso spesso sconosciuto:** controlla prima i rilevamenti della palla e dei
-  giocatori. Aumentare `--possession-threshold` può assegnare più frame, ma anche
-  introdurre associazioni sbagliate.
+I test coprono indici dinamici (dizionario/lista e ordine diverso), canestro che
+compare solo nel nono frame, conservazione del riferimento, esclusione delle
+classi estranee, video senza rilevamenti, continuità dei primi dieci fotogrammi,
+JSON e video, oltre a colore, possesso e tiri. I test di integrazione simulano
+le risposte di YOLO: non misurano l'accuratezza dei tuoi pesi.
 
-Per verificare la logica del possesso senza scaricare modelli o video:
+Il modello `best.pt` del repository è stato caricato nel cloud: contiene le sette
+classi previste. Una prova completa su una clip dimostrativa di sei frame ha
+generato il video leggibile e tutti e quattro i JSON, gestendo l'assenza di
+rilevamenti senza errori. Questa clip non è una partita di basket: la qualità
+dei rilevamenti e degli esiti va valutata su una clip della tua partita.
 
-```bash
-python -m unittest discover -s scripts -p test_possession.py
-```
+Lo script `scripts/create_test_video.py` resta disponibile per generare una breve
+clip da una foto pubblica. La foto non è una partita: con il modello personalizzato
+non sono garantiti rilevamenti Player, Ball o Hoop. Per valutare la qualità usa
+una breve clip della tua partita con canestro visibile all'inizio.
 
-Per eseguire anche i test del colore (cerchio arancione, rumore, forme da escludere,
-selezione del candidato e range HSV personalizzati/non validi):
+- **Modello non trovato:** controlla `models/best.pt` o indica il percorso con `--model`.
+- **Classi mancanti:** usa i pesi addestrati che contengono Player, Ball e Hoop con questi nomi.
+- **Canestro non trovato:** controlla i primi dieci frame e le prestazioni del modello sulla classe Hoop.
+- **Frame senza oggetti:** è normale; il programma continua. Il fallback colore può ancora trovare una palla.
+- **JSON della palla vuoto:** nessuna Ball sopra soglia e nessun candidato arancione valido. Verifica il video o regola le soglie/HSV.
+- **Video non leggibile:** controlla il percorso o converti in MP4 con codec H.264 e FPS costanti.
+- **Libreria non trovata:** attiva `.venv` e reinstalla `requirements.txt`.
 
-```bash
-python -m unittest discover -s scripts -p "test_*.py"
-```
-
-Questo è un prototipo didattico. Prima di distribuire un prodotto, consulta i
-[termini di licenza Ultralytics](https://www.ultralytics.com/license) per codice e modelli.
+Prima di distribuire un prodotto, consulta i [termini Ultralytics](https://www.ultralytics.com/license)
+e quelli dei dati usati per addestrare il tuo modello.

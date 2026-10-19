@@ -6,14 +6,12 @@ from pathlib import Path  # Gestisce i percorsi dei file.
 
 from src.detection import rileva_persone  # Importa la funzione che analizza il video.
 from src.ball_color import valida_range_hsv  # Controlla gli intervalli di colore scelti dall'utente.
-from src.shots import parse_hoop_bbox  # Legge il rettangolo del ferro nelle coordinate del video.
 
 
 def main():
     # Descriviamo il programma e le opzioni disponibili.
     parser = argparse.ArgumentParser(description="Segue giocatori e palla, stima possesso e tiri verso il canestro; salva video e JSON.")
     parser.add_argument("--input", required=True, type=Path, help="Video da analizzare, es. data/partita.mp4")
-    parser.add_argument("--hoop-bbox", required=True, type=parse_hoop_bbox, help='Coordinate del ferro nel primo frame: "x1,y1,x2,y2"')
     parser.add_argument("--shot-output", type=Path, default=Path("output/shots.json"), help="File JSON con i tiri e gli esiti stimati")
     parser.add_argument("--min-shot-speed", type=float, default=5.0, help="Velocità minima verso l'alto in pixel/frame (default: 5)")
     parser.add_argument("--output", type=Path, default=Path("output/partita_rilevata.mp4"), help="Video da salvare")
@@ -21,7 +19,7 @@ def main():
     parser.add_argument("--ball-tracks", type=Path, default=Path("output/ball_tracks.json"), help="File JSON con le posizioni della palla")
     parser.add_argument("--possession-output", type=Path, default=Path("output/possession.json"), help="File JSON con il possesso per ogni frame")
     parser.add_argument("--possession-threshold", type=float, default=150.0, help="Distanza massima per il possesso in pixel (default: 150)")
-    parser.add_argument("--model", type=Path, default=Path("models/yolov8n.pt"), help="Pesi del modello YOLOv8")
+    parser.add_argument("--model", type=Path, default=Path("models/best.pt"), help="Pesi personalizzati con le classi Player, Ball e Hoop")
     parser.add_argument("--confidence", type=float, default=0.1, help="Soglia YOLO tra 0 e 1 (default: 0.1, adatta a ByteTrack)")
     parser.add_argument("--ball-confidence", type=float, default=0.25, help="Soglia della palla tra 0 e 1 (default: 0.25)")
     parser.add_argument("--use-color-fallback", action=argparse.BooleanOptionalAction, default=True, help="Fallback arancione attivo per default; disattiva con --no-use-color-fallback")
@@ -43,8 +41,8 @@ def main():
             ball_tracks_path=args.ball_tracks, ball_confidence=args.ball_confidence,
             possession_path=args.possession_output, possession_threshold=args.possession_threshold,
             use_color_fallback=args.use_color_fallback, color_hsv_range=hsv_range,
-            hoop_bbox=args.hoop_bbox, shot_path=args.shot_output, min_shot_speed=args.min_shot_speed,
-        )  # Mantiene le analisi precedenti e aggiunge i tiri verso il canestro indicato.
+            shot_path=args.shot_output, min_shot_speed=args.min_shot_speed,
+        )  # Il canestro viene cercato automaticamente nei primi dieci fotogrammi.
     except (OSError, ValueError, RuntimeError) as errore:
         parser.exit(1, f"Errore: {errore}\n")  # Termina con un codice che segnala il problema.
     print(f"Completato: {fotogrammi} fotogrammi, {rilevamenti} posizioni con ID.")  # Conta le posizioni, non i giocatori distinti.

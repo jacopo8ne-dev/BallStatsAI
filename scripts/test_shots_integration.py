@@ -26,18 +26,27 @@ class TestTiriVideo(unittest.TestCase):
                 for _ in points:
                     writer.write(np.zeros((200,200,3), dtype=np.uint8))
                 writer.release()
-                player = SimpleNamespace(id=np.array([7]), xyxy=np.array([[20,130,40,170]]))
+                (root/"model.pt").touch()  # Il caricamento dei pesi viene simulato soltanto in questo test.
+                player = SimpleNamespace(id=np.array([7]), cls=np.array([5]), xyxy=np.array([[20,130,40,170]]))
                 model = Mock()
+                model.names = {0:"Ref", 1:"Ball", 2:"Clock", 3:"Hoop", 4:"Overlay", 5:"Player", 6:"Scoreboard"}
                 model.track.return_value = [SimpleNamespace(boxes=[player])]
                 ball_model = Mock()
-                ball_model.predict.side_effect = [[SimpleNamespace(boxes=[SimpleNamespace(
-                    xyxy=np.array([[x-2,y-2,x+2,y+2]]), conf=np.array([0.8]))])] for x,y in points]
+                ball_results = iter([[SimpleNamespace(boxes=[SimpleNamespace(
+                    xyxy=np.array([[x-2,y-2,x+2,y+2]]), cls=np.array([1]), conf=np.array([0.8]))])] for x,y in points])
+                def predict(frame, classes, **kwargs):
+                    if classes == [3]:  # Il canestro viene ora individuato automaticamente.
+                        return [SimpleNamespace(boxes=[SimpleNamespace(xyxy=np.array([[90,90,110,100]]), cls=np.array([3]), conf=np.array([0.9]))])]
+                    self.assertEqual(classes, [1])
+                    return next(ball_results)
+                ball_model.predict.side_effect = predict
                 with patch("src.detection.YOLO", side_effect=[model, ball_model]), patch("src.detection.cv2.putText", wraps=cv2.putText) as labels:
                     count, _ = rileva_persone(source, root/"output.mp4", root/"model.pt",
                         tracks_path=root/"players.json", ball_tracks_path=root/"balls.json",
-                        possession_path=root/"possession.json", hoop_bbox=(90,90,110,100), shot_path=root/"shots.json")
+                        possession_path=root/"possession.json", shot_path=root/"shots.json")
                 events = json.loads((root/"shots.json").read_text())
                 self.assertEqual(count, len(points))
+                self.assertTrue(all(call.kwargs["classes"] == [5] for call in model.track.call_args_list))
                 self.assertEqual(events, [{"frame":0,"player_id":7,"made":made,"shot_x":100.0,"shot_y":150.0,"distance":55.0}])
                 texts = [call.args[1] for call in labels.call_args_list]
                 self.assertTrue(any("TIRO!" in text and "IN CORSO" in text for text in texts))
