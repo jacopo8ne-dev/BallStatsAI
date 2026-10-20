@@ -31,7 +31,7 @@ def rileva_persone(input_path, output_path, model_path, confidence=0.1, tracks_p
                    possession_path="output/possession.json", possession_threshold=150.0,
                    use_color_fallback=False, color_hsv_range=DEFAULT_HSV_RANGE,
                    shot_path="output/shots.json", min_shot_speed=5.0, hoop_confidence=0.3,
-                   hoop_bbox=None, skip_frames=1, debug_dir="output/debug"):
+                   hoop_bbox=None, skip_frames=1, debug_dir="output/debug", imgsz=640):
     input_path = Path(input_path)  # Converte il percorso del video in un oggetto Path.
     output_path = Path(output_path)  # Converte il percorso del risultato.
     model_path = Path(model_path)  # Converte il percorso dei pesi del modello.
@@ -77,6 +77,8 @@ def rileva_persone(input_path, output_path, model_path, confidence=0.1, tracks_p
 
     if not isinstance(skip_frames, int) or isinstance(skip_frames, bool) or skip_frames < 1:
         raise ValueError("--skip-frames deve essere un intero maggiore o uguale a 1.")
+    if not isinstance(imgsz, int) or isinstance(imgsz, bool) or imgsz < 32 or imgsz % 32:
+        raise ValueError("--imgsz deve essere un multiplo di 32, per esempio 640, 960 o 1280.")
     if hoop_bbox is not None:
         hoop_bbox = parse_hoop_bbox(",".join(str(value) for value in hoop_bbox))
 
@@ -102,7 +104,7 @@ def rileva_persone(input_path, output_path, model_path, confidence=0.1, tracks_p
         model = YOLO(str(model_path))  # Una sola istanza, un solo passaggio per frame elaborato.
         classi = trova_classi_modello(model.names)
         tracker_giocatori = crea_tracker(ROOT / "cfg/trackers/bytetrack.yaml", skip_frames)
-        tracker_palla = BallTracker(skip_frames)
+        tracker_palla = BallTracker(skip_frames, fps)
         tracker_canestro = HoopTracker(hoop_confidence, hoop_bbox)
         if hoop_bbox is not None:
             print(f"Canestro manuale: {hoop_bbox}. Ricerca automatica disattivata.")
@@ -124,7 +126,7 @@ def rileva_persone(input_path, output_path, model_path, confidence=0.1, tracks_p
                     richieste.append(classi["Hoop"])
                 # Nel debug mostriamo anche Hoop sotto soglia, fino al limite diagnostico 0.01.
                 soglia = min(confidence, ball_confidence, hoop_confidence, 0.01 if fotogrammi < 150 else 1.0)
-                results = model.predict(frame, classes=richieste, conf=soglia, device="cpu", verbose=False)
+                results = model.predict(frame, classes=richieste, conf=soglia, imgsz=imgsz, device="cpu", verbose=False)
                 groups = separa_rilevamenti(results, classi, frame.shape[:2])
                 players = [row for row in groups["Player"] if row[4] >= confidence]
                 balls = [row for row in groups["Ball"] if row[4] >= ball_confidence
@@ -135,7 +137,7 @@ def rileva_persone(input_path, output_path, model_path, confidence=0.1, tracks_p
                 giocatori = [{"frame": fotogrammi, "id": int(track[4]),
                               "bbox": [int(value) for value in track[:4]]} for track in tracks]
                 previous = tracker_palla.last
-                palla = tracker_palla.update(balls, fotogrammi, frame.shape[:2])
+                palla = tracker_palla.update(balls, fotogrammi, frame.shape[:2], players)
                 # Il nuovo punto permette di ricostruire SOLO i frame ancora in attesa.
                 interpolated = interpola_palla(previous, palla, [item["frame"] for item in pending])
                 for item in pending:
@@ -145,7 +147,7 @@ def rileva_persone(input_path, output_path, model_path, confidence=0.1, tracks_p
                     bbox_colore = detect_ball_by_color(frame, color_hsv_range)
                     if bbox_colore is not None and tracker_palla.movimento_valido(bbox_colore, fotogrammi):
                         palla = {"frame": fotogrammi, "id": None, "tracker_id": None, "bbox": bbox_colore,
-                                 "confidence": 0.0, "source": "color"}  # Il colore non aggiorna ByteTrack né ancora l'interpolazione.
+                                 "confidence": 0.0, "source": "color"}  # Il colore non aggiorna il tracker né ancora l'interpolazione.
                 pending.append({"frame": fotogrammi, "image": frame, "players": giocatori,
                                 "ball": palla, "hoop": canestro})
                 elaborati += 1

@@ -12,12 +12,14 @@ from test_custom_model import run_pipeline, row
 class TestTiriVideo(unittest.TestCase):
     def test_video_json_e_risultati(self):
         for made, points in [(True,[(100,150),(100,140),(100,110),(100,70),(100,80),(100,95),(100,105)]),
-                             (False,[(100,150),(100,140),(120,70),(125,80),(130,105)])]:
+                             (False,[(100,150),(100,140),(110,105),(120,70),(125,80),(130,105)])]:
             delay=60 if made else 0
             points=[points[0]]*delay+points
             detections={}
             for index,(x,y) in enumerate(points):
-                detections[index]=[row(5,[20,130,40,170]),row(1,[x-2,y-2,x+2,y+2],.8)]
+                detections[index]=[row(5,[50,130,70,170])]
+                if index>=delay-5:  # Una palla ferma per due secondi verrebbe scartata come punto statico.
+                    detections[index].append(row(1,[x-2,y-2,x+2,y+2],.8))
                 if index>=delay:
                     detections[index].append(row(3,[90,90,110,100]))
             with self.subTest(made=made), TemporaryDirectory() as directory, patch(
@@ -34,7 +36,7 @@ class TestTiriVideo(unittest.TestCase):
 
     def test_tiro_con_skip_tempi_originali(self):
         points=[(100,150),(100,130),(100,110),(100,70),(100,80),(100,95),(100,105)]
-        detections={2*i:[row(5,[20,130,40,170]),row(1,[x-2,y-2,x+2,y+2],.8)] for i,(x,y) in enumerate(points)}
+        detections={2*i:[row(5,[50,130,70,170]),row(1,[x-2,y-2,x+2,y+2],.8)] for i,(x,y) in enumerate(points)}
         with TemporaryDirectory() as directory:
             _,records,_,_,_=run_pipeline(Path(directory),detections,14,skip=2,hoop_bbox=(90,90,110,100))
         self.assertEqual(len(records["shots"]),1)
