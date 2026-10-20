@@ -15,6 +15,7 @@ def main():
     parser.add_argument("--input", required=True, type=Path, help="Video da analizzare, es. data/partita.mp4")
     parser.add_argument("--hoop-bbox", type=parse_hoop_bbox, help='Canestro manuale opzionale: "x1,y1,x2,y2"; disattiva la ricerca automatica')
     parser.add_argument("--skip-frames", type=int, default=1, help="Elabora un frame ogni N (default: 1); 2 dimezza inferenze e FPS di uscita")
+    parser.add_argument("--imgsz", type=int, default=640, help="Lato dell'immagine data a YOLO (default: 640); 1280 trova palle piccole ma è più lento")
     parser.add_argument("--debug-dir", type=Path, default=Path("output/debug"), help="Cartella per il debug del canestro nei primi 150 frame")
     parser.add_argument("--shot-output", type=Path, default=Path("output/shots.json"), help="File JSON con i tiri e gli esiti stimati")
     parser.add_argument("--min-shot-speed", type=float, default=5.0, help="Velocità minima verso l'alto in pixel/frame (default: 5)")
@@ -32,6 +33,8 @@ def main():
     args = parser.parse_args()  # Legge i valori forniti dall'utente.
     if args.skip_frames < 1:
         parser.error("--skip-frames deve essere un intero maggiore o uguale a 1.")
+    if args.imgsz < 32 or args.imgsz % 32:
+        parser.error("--imgsz deve essere un multiplo di 32, per esempio 640, 960 o 1280.")
     if not 0 < args.confidence <= 1:  # Impedisce di usare una soglia non valida.
         parser.error("--confidence deve essere maggiore di 0 e minore o uguale a 1.")
     if not 0 < args.ball_confidence <= 1:  # La palla ha una soglia separata da quella dei giocatori.
@@ -53,6 +56,7 @@ def main():
             shot_path=args.shot_output, min_shot_speed=args.min_shot_speed,
             hoop_confidence=args.hoop_confidence,
             hoop_bbox=args.hoop_bbox, skip_frames=args.skip_frames, debug_dir=args.debug_dir,
+            imgsz=args.imgsz,
         )  # Unica inferenza YOLO, poi tracker indipendenti e interpolazione.
     except (OSError, ValueError, RuntimeError) as errore:
         parser.exit(1, f"Errore: {errore}\n")  # Termina con un codice che segnala il problema.

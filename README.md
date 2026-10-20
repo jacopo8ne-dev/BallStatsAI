@@ -1,7 +1,7 @@
 # BallStatsAI — modello personalizzato per partite di basket
 
 Il progetto usa il tuo modello **`models/best.pt`** per riconoscere giocatori,
-palla e canestro. Due tracker ByteTrack separati seguono **Player** e **Ball**;
+palla e canestro. Un tracker ByteTrack segue **Player** e un tracker dedicato segue **Ball**;
 un riferimento aggiornato periodicamente segue **Hoop**. Gli indici vengono ricavati
 ogni volta da `model.names`: non serve conoscere l'ordine delle classi.
 
@@ -22,11 +22,10 @@ Funziona sulla CPU, senza una scheda grafica dedicata.
 BallStatsAI/
 ├── main.py                       # Comando per avviare l'analisi
 ├── requirements.txt              # Dipendenze Python
-├── bytetrack_ball.yaml           # Soglie del tracker riservato alla palla
 ├── src/
 │   ├── __init__.py
 │   ├── detection.py              # Classi dinamiche, tracking, video e JSON
-│   ├── ball_tracking.py          # ByteTrack palla, movimento e interpolazione
+│   ├── ball_tracking.py          # Tracker della palla, punti statici e interpolazione
 │   ├── ball_color.py             # Fallback arancione opzionale, spento per default
 │   ├── possession.py             # Possesso basato sulla distanza
 │   └── shots.py                  # Canestro periodico/manuale e tiri stimati
@@ -111,7 +110,7 @@ Le coordinate manuali del canestro sono opzionali. Se il modello si trova altrov
 indica il percorso con `--model percorso/best.pt`. Usa virgolette nei percorsi con
 spazi. Il programma carica **una sola istanza di YOLO** ed esegue **una sola inferenza
 per frame elaborato**, per Player, Ball e Hoop insieme. Divide poi i risultati in
-Python: ByteTrack giocatori e ByteTrack palla hanno stati indipendenti.
+Python: ByteTrack giocatori e tracker della palla hanno stati indipendenti.
 
 Per ridurre le inferenze, elabora un frame ogni due:
 
@@ -198,46 +197,43 @@ I giocatori mantengono il loro ByteTrack standard e la soglia `--confidence 0.1`
 Gli ID sono locali al video; occlusioni e incroci possono modificarli. Arbitri e
 altre classi non vengono inviati al tracker dei giocatori.
 
-La palla usa **un ByteTrack dedicato**, configurato in `bytetrack_ball.yaml`:
+La palla usa **un tracker dedicato senza ByteTrack**, in `src/ball_tracking.py`.
+ByteTrack associa i rettangoli per sovrapposizione: una palla di 10–15 pixel che si
+muove veloce non si sovrappone quasi mai a quella del frame precedente, quindi le
+osservazioni deboli venivano scartate. Il nuovo tracker usa invece la **distanza
+dalla posizione prevista**.
 
-| Parametro | Valore | Funzione |
-| --- | --- | --- |
-| `track_high_thresh` | `0.15` | Primo livello di associazione |
-| `track_low_thresh` | `0.05` | Recupero di osservazioni deboli su una traccia associabile |
-| `new_track_thresh` | `0.15` | Soglia per iniziare o riagganciare una traccia |
-| `track_buffer` | `30` | Memoria di una traccia persa, in frame originali |
-| `match_thresh` | `0.8` | Soglia del costo di associazione geometrica |
-| `fuse_score` | `false` | Evita di penalizzare ulteriormente l'associazione di box poco confidenti |
+**Il default di `--ball-confidence` resta 0.05**: è la soglia minima dei candidati,
+non quella per iniziare una traccia. Il nome della classe è sempre **Ball**, letto
+dinamicamente da `best.pt`, non `sports ball` di COCO.
 
-**Il default di `--ball-confidence` passa da 0.50 a 0.05**: a 0.50 YOLO scarterebbe
-le osservazioni che il nuovo tracker deve recuperare. È la soglia minima dei
-candidati, non quella per iniziare una traccia. Il nome della classe è sempre
-**Ball**, letto dinamicamente da `best.pt`, non `sports ball` di COCO.
-Puoi rialzare `--ball-confidence`, ma perderai i candidati sotto il valore scelto.
-Le soglie basse aumentano la sensibilità e possono aumentare anche i falsi positivi.
-
-Il tracker segue **una sola palla principale**. Al primo aggancio sceglie il
-candidato più sicuro; in seguito sceglie quello più vicino all'ultima osservazione
-valida, a parità quello più sicuro. Prima di aggiornare ByteTrack:
+Il tracker segue **una sola palla principale**:
 
 - Scarta box invalidi e box con area superiore al **5% del frame**.
-- Tra frame consecutivi scarta spostamenti del centro oltre **200 pixel**.
-- Per brevi intervalli usa 200 pixel moltiplicati per il numero di frame trascorsi.
-- Dopo **più di 5 frame originali mancanti**, ammette un riaggancio solo entro
-  **300 pixel dall'ultima osservazione reale**. Non allarga questo limite col tempo.
+- **Dimensione:** scarta candidati più grandi di **0.3 volte l'altezza tipica (mediana)
+  dei giocatori** del frame: teste e orecchie del pubblico in primo piano.
+- **Inizio:** serve un candidato di almeno **0.15**, oppure due candidati deboli
+  vicini in due frame elaborati consecutivi. In entrambi i casi il candidato deve
+  trovarsi **vicino a un giocatore** (dentro il suo box allargato della sua altezza);
+  i box alti più del doppio della mediana, cioè il pubblico, non contano.
+- **Previsione:** stima la velocità dalle ultime osservazioni e prevede dove sarà la
+  palla. Accetta il candidato più vicino alla previsione, entro una finestra di
+  `max(30, 4 × lato della palla)` pixel più **10 pixel per ogni frame trascorso**.
+  Anche un candidato a 0.05 viene accettato se è nella finestra, anche lontano dai
+  giocatori (passaggi e tiri).
+- **Cambio di traccia:** un candidato fuori dalla finestra con almeno 0.15, vicino a un
+  giocatore, sostituisce la traccia se è più sicuro di 0.2 rispetto al migliore vicino
+  (o se non ci sono vicini). Il tracker non resta mai bloccato su una posizione vecchia.
+- **Perdita:** dopo **1 secondo** (calcolato sugli FPS reali del video) senza palla la
+  traccia termina; la successiva riparte da qualsiasi punto del campo con un nuovo `id`.
+- **Punti statici:** se YOLO vede una "palla" nello stesso punto per almeno 10 frame
+  distribuiti su almeno 1 secondo (un logo, un murale, una palla ferma a bordo campo),
+  i candidati in quel punto vengono ignorati finché non smette di comparire per 10
+  secondi. Il prezzo: una palla tenuta ferma a lungo, per esempio prima di un tiro
+  libero, si perde finché non si muove.
 
-Se il movimento rapido impedisce la sovrapposizione necessaria a ByteTrack, una
-nuova osservazione YOLO di almeno 0.15, ammessa dal filtro di movimento, può
-riagganciare la palla. Le osservazioni più deboli richiedono un'associazione ByteTrack.
-Il buffer non garantisce il recupero dopo qualsiasi occlusione: un rilevamento
-debole non può sempre riattivare una traccia persa.
-
-L'`id` della palla identifica la continuità della traccia principale: resta uguale
-finché fra osservazioni accettate trascorrono al massimo 30 frame. È distinto da
-`tracker_id`, l'ID interno ByteTrack, che può essere `null` durante il riaggancio.
-Il buffer di 30 frame corrisponde a un secondo **solo a 30 FPS**. Con frame saltati
-viene adattato il numero di aggiornamenti del tracker, mantenendo lo stesso
-intervallo nelle coordinate temporali originali.
+L'`id` della palla identifica la continuità della traccia principale. Per compatibilità
+il JSON contiene ancora `tracker_id`, ora uguale a `id` per le osservazioni YOLO.
 
 Per buchi di **1–5 frame originali**, due osservazioni YOLO accettate della stessa
 traccia permettono un'interpolazione lineare dei quattro angoli del box. La
@@ -247,8 +243,19 @@ e il JSON usa `source: "interpolated"`. Con `--skip-frames`, vengono ricostruiti
 solo i frame che verranno effettivamente salvati.
 
 Non vengono inventate posizioni all'inizio, alla fine o nei buchi superiori a
-cinque frame. Le previsioni di Kalman senza osservazione non vengono esportate
+cinque frame. Le posizioni previste senza osservazione non vengono esportate
 come rilevamenti. Se la palla non viene trovata, l'analisi continua senza errori.
+
+### Risoluzione di inferenza
+
+Con `--imgsz` scegli il lato dell'immagine data a YOLO (default `640`, multiplo di 32).
+Su riprese larghe la palla è di pochi pixel e a 640 YOLO spesso non la vede:
+
+```bash
+python main.py --input data/partita.mp4 --imgsz 1280
+```
+
+A 1280 l'inferenza sulla CPU è circa tre volte e mezza più lenta.
 
 ## Fallback arancione opzionale
 
@@ -259,7 +266,7 @@ python main.py --input data/partita.mp4 --use-color-fallback
 ```
 
 Interviene solo quando il tracker non restituisce una palla. Il colore non aggiorna
-ByteTrack, non cambia l'ultima posizione YOLO e non è usato come estremo per
+il tracker, non cambia l'ultima posizione YOLO e non è usato come estremo per
 l'interpolazione. Un'interpolazione successiva ha priorità sul colore. Scarpa,
 divisa o parquet arancioni possono ancora ingannarlo: per usare solo il modello,
 non attivare questa opzione oppure usa `--no-use-color-fallback`.
@@ -345,9 +352,9 @@ fra loro e dagli altri file dell'analisi.
 
 ```json
 [
-  {"frame": 0, "id": 1, "tracker_id": 2, "bbox": [300,180,320,200], "confidence": 0.82, "source": "yolo"},
+  {"frame": 0, "id": 1, "tracker_id": 1, "bbox": [300,180,320,200], "confidence": 0.82, "source": "yolo"},
   {"frame": 1, "id": 1, "tracker_id": null, "bbox": [310,190,330,210], "confidence": 0.75, "source": "interpolated"},
-  {"frame": 2, "id": 1, "tracker_id": 2, "bbox": [320,200,340,220], "confidence": 0.75, "source": "yolo"}
+  {"frame": 2, "id": 1, "tracker_id": 1, "bbox": [320,200,340,220], "confidence": 0.75, "source": "yolo"}
 ]
 ```
 
@@ -399,9 +406,9 @@ Per eseguire i test della logica e dell'integrazione con rilevamenti controllati
 python -m unittest discover -s scripts -p "test_*.py" -v
 ```
 
-I test usano ByteTrack reale con rilevamenti YOLO controllati. Coprono inferenza
-unica, esclusione delle classi estranee, soglie basse, filtro dimensionale, salti
-oltre 200 pixel, riaggancio entro 300 pixel, interpolazione e assenza del punto
+I test usano ByteTrack reale (giocatori) con rilevamenti YOLO controllati. Coprono inferenza
+unica, esclusione delle classi estranee, soglie basse, filtro dimensionale, previsione
+della palla, finestra di ricerca, punti statici, ripartenza dopo una perdita, interpolazione e assenza del punto
 futuro, video/JSON coerenti, canestro oltre il frame 300, aggiornamenti periodici,
 modalità manuale, candidati sotto soglia nel debug e frame saltati. Il modello
 reale `best.pt` è verificato separatamente su una clip dimostrativa; per misurare
@@ -416,7 +423,7 @@ una breve clip della tua partita con canestro visibile all'inizio.
 - **Classi mancanti:** usa i pesi addestrati che contengono Player, Ball e Hoop con questi nomi.
 - **Canestro non trovato:** consulta `output/debug/`, regola `--hoop-confidence` oppure usa `--hoop-bbox`. La ricerca automatica continua ogni 30 frame.
 - **Frame senza oggetti:** è normale; il programma continua. Il fallback colore interviene solo se attivato manualmente.
-- **JSON della palla vuoto:** nessuna Ball ha superato i filtri di confidenza, dimensione, associazione e movimento. Verifica il modello e prova senza saltare frame. Dopo una perdita lunga serve un candidato entro 300 pixel dall'ultima posizione.
+- **JSON della palla vuoto:** nessuna Ball ha superato i filtri di confidenza, dimensione, associazione e movimento. Verifica il modello, prova senza saltare frame e con `--imgsz 1280`.
 - **Video non leggibile:** controlla il percorso o converti in MP4 con codec H.264 e FPS costanti.
 - **Libreria non trovata:** attiva `.venv` e reinstalla `requirements.txt`.
 
