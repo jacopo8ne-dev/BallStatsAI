@@ -22,6 +22,7 @@ def main():
     parser.add_argument("--model", type=Path, default=Path("models/best.pt"), help="Pesi personalizzati con le classi Player, Ball e Hoop")
     parser.add_argument("--confidence", type=float, default=0.1, help="Soglia YOLO tra 0 e 1 (default: 0.1, adatta a ByteTrack)")
     parser.add_argument("--ball-confidence", type=float, default=0.25, help="Soglia della palla tra 0 e 1 (default: 0.25)")
+    parser.add_argument("--hoop-confidence", type=float, default=0.3, help="Soglia del canestro tra 0 e 1 (default: 0.3); ricerca nei primi 300 frame")
     parser.add_argument("--use-color-fallback", action=argparse.BooleanOptionalAction, default=True, help="Fallback arancione attivo per default; disattiva con --no-use-color-fallback")
     parser.add_argument("--color-hsv-range", type=int, nargs=6, default=[5, 100, 100, 15, 255, 255], metavar=("H_MIN", "S_MIN", "V_MIN", "H_MAX", "S_MAX", "V_MAX"), help="Sei valori HSV: minimo e massimo (OpenCV)")
     args = parser.parse_args()  # Legge i valori forniti dall'utente.
@@ -29,6 +30,8 @@ def main():
         parser.error("--confidence deve essere maggiore di 0 e minore o uguale a 1.")
     if not 0 < args.ball_confidence <= 1:  # La palla ha una soglia separata da quella dei giocatori.
         parser.error("--ball-confidence deve essere maggiore di 0 e minore o uguale a 1.")
+    if not 0 < args.hoop_confidence <= 1:  # Il canestro ha una soglia indipendente.
+        parser.error("--hoop-confidence deve essere maggiore di 0 e minore o uguale a 1.")
     if not math.isfinite(args.possession_threshold) or args.possession_threshold <= 0:  # Rifiuta anche NaN e infinito.
         parser.error("--possession-threshold deve essere un numero finito maggiore di zero.")
     if not math.isfinite(args.min_shot_speed) or args.min_shot_speed <= 0:
@@ -42,7 +45,8 @@ def main():
             possession_path=args.possession_output, possession_threshold=args.possession_threshold,
             use_color_fallback=args.use_color_fallback, color_hsv_range=hsv_range,
             shot_path=args.shot_output, min_shot_speed=args.min_shot_speed,
-        )  # Il canestro viene cercato automaticamente nei primi dieci fotogrammi.
+            hoop_confidence=args.hoop_confidence,
+        )  # Cerca il canestro entro 300 frame, fermandosi appena lo trova.
     except (OSError, ValueError, RuntimeError) as errore:
         parser.exit(1, f"Errore: {errore}\n")  # Termina con un codice che segnala il problema.
     print(f"Completato: {fotogrammi} fotogrammi, {rilevamenti} posizioni con ID.")  # Conta le posizioni, non i giocatori distinti.

@@ -26,7 +26,7 @@ def rileva_persone(input_path, output_path, model_path, confidence=0.1, tracks_p
                    ball_tracks_path="output/ball_tracks.json", ball_confidence=0.25,
                    possession_path="output/possession.json", possession_threshold=150.0,
                    use_color_fallback=True, color_hsv_range=DEFAULT_HSV_RANGE,
-                   shot_path="output/shots.json", min_shot_speed=5.0):
+                   shot_path="output/shots.json", min_shot_speed=5.0, hoop_confidence=0.3):
     input_path = Path(input_path)  # Converte il percorso del video in un oggetto Path.
     output_path = Path(output_path)  # Converte il percorso del risultato.
     model_path = Path(model_path)  # Converte il percorso dei pesi del modello.
@@ -54,6 +54,8 @@ def rileva_persone(input_path, output_path, model_path, confidence=0.1, tracks_p
         raise ValueError("Il JSON della palla deve essere diverso da input, output, modello e JSON dei giocatori.")
     if not 0 < ball_confidence <= 1:  # Evita soglie non valide anche fuori dalla riga di comando.
         raise ValueError("La soglia della palla deve essere compresa tra 0 (escluso) e 1.")
+    if not 0 < hoop_confidence <= 1:
+        raise ValueError("--hoop-confidence deve essere maggiore di 0 e minore o uguale a 1.")
     if possession_path.suffix.lower() != ".json":  # Il possesso deve essere salvato in formato JSON.
         raise ValueError("Il file del possesso deve avere estensione .json.")
     if possession_path.resolve() in (input_path.resolve(), output_path.resolve(), model_path.resolve(), tracks_path.resolve(), ball_tracks_path.resolve()):
@@ -89,18 +91,7 @@ def rileva_persone(input_path, output_path, model_path, confidence=0.1, tracks_p
         classi = trova_classi_modello(model.names)  # Ricava gli indici di Player, Ball e Hoop dai nomi reali.
         # Carica gli stessi pesi in una seconda istanza: palla e canestro non modificano lo stato di ByteTrack.
         modello_palla = YOLO(str(model_path))
-        frames_iniziali = [frame]  # Conserva i primi fotogrammi per analizzarli tutti dal frame zero.
-        for _ in range(9):  # In totale cerca il canestro in un massimo di dieci frame.
-            letto, iniziale = video.read()
-            if not letto:
-                break
-            frames_iniziali.append(iniziale)
-        hoop_bbox = detect_hoop(modello_palla, frames_iniziali, classi["Hoop"])
-        tiri = ShotDetector(hoop_bbox, fps, min_shot_speed) if hoop_bbox is not None else None
-        if tiri is None:
-            print("Canestro non trovato nei primi 10 frame: continuo con giocatori, palla e possesso; shots.json sarà vuoto.")
-        else:
-            print(f"Canestro rilevato automaticamente: {hoop_bbox}. Il riferimento resta fisso per tutto il video.")
+        tiri = None  # Attiva i tiri solo quando viene trovato un canestro valido.
         output_path.parent.mkdir(parents=True, exist_ok=True)  # Prepara la cartella dei risultati.
         codec = cv2.VideoWriter_fourcc(*"mp4v")  # Sceglie un codec per salvare un video MP4.
         writer = cv2.VideoWriter(str(output_path), codec, fps, (larghezza, altezza))  # Crea il video.
@@ -111,6 +102,14 @@ def rileva_persone(input_path, output_path, model_path, confidence=0.1, tracks_p
         possession_path.parent.mkdir(parents=True, exist_ok=True)  # Prepara la cartella del possesso prima di elaborare il video.
         shot_path.parent.mkdir(parents=True, exist_ok=True)  # Prepara la cartella dei tiri prima dell'analisi.
         while successo:  # Elabora un fotogramma alla volta per contenere l'uso di memoria.
+            # Cerca sull'immagine originale, senza accumulare 300 frame in memoria.
+            if tiri is None and fotogrammi < 300:
+                hoop_bbox = detect_hoop(modello_palla, [frame], classi["Hoop"], hoop_confidence)
+                if hoop_bbox is not None:
+                    tiri = ShotDetector(hoop_bbox, fps, min_shot_speed)
+                    print(f"Canestro trovato al frame {fotogrammi}! Riferimento fisso: {hoop_bbox}.")
+                elif fotogrammi == 299:  # I primi 300 frame hanno indici da 0 a 299.
+                    print("Avviso: canestro non trovato nei primi 300 frame. Tiri disattivati; continuo con giocatori, palla e possesso.")
             giocatori_frame = []  # Azzera i giocatori da confrontare in questo fotogramma.
             palle_frame = []  # Non riutilizza una palla rilevata in un fotogramma passato.
             # persist=True conserva lo stesso tracker tra i fotogrammi invece di ricreare gli ID ogni volta.
@@ -168,16 +167,15 @@ def rileva_persone(input_path, output_path, model_path, confidence=0.1, tracks_p
             fotogrammi += 1  # Aggiorna il numero di fotogrammi elaborati.
             if fotogrammi % 100 == 0:  # Comunica l'avanzamento durante i video lunghi.
                 print(f"Elaborati {fotogrammi} fotogrammi...")  # Mostra il progresso nel terminale.
-            if fotogrammi < len(frames_iniziali):
-                frame = frames_iniziali[fotogrammi]  # Riprende dal buffer senza saltare né duplicare i frame iniziali.
-            else:
-                successo, frame = video.read()  # Dopo il buffer prosegue la lettura normale del video.
+            successo, frame = video.read()  # Ogni frame viene elaborato una sola volta.
     finally:  # Libera le risorse anche in caso di interruzione.
         video.release()  # Chiude il video di ingresso.
         if writer is not None:  # Chiude l'uscita soltanto se è stata creata.
             writer.release()  # Completa la scrittura del file MP4.
     if tiri is not None:
         tiri.finish_video(fotogrammi)  # Esclude i candidati rimasti in volo alla fine della registrazione.
+    elif fotogrammi < 300:  # Segnala anche il caso di un video breve senza canestro.
+        print(f"Avviso: canestro non trovato nei {fotogrammi} frame disponibili. Tiri disattivati; shots.json sarà vuoto.")
     with shot_path.open("w", encoding="utf-8") as file:
         json.dump(tiri.shots if tiri is not None else [], file, indent=2, allow_nan=False)
     if tiri is not None:

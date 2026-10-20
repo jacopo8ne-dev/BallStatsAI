@@ -132,22 +132,35 @@ fino al salvataggio, quindi video lunghi richiedono più RAM.
 
 ## Canestro automatico
 
-`src/shots.py` cerca la classe **Hoop** nei primi **10 fotogrammi**, o in tutti
-quelli disponibili se il video è più corto. Usa una soglia di fiducia `0.25` e
-sceglie il rettangolo valido con la fiducia maggiore. La ricerca usa un piccolo
-buffer: i fotogrammi iniziali vengono poi elaborati dal frame zero, senza saltarli
-né duplicarli. Il cerchio verde compare già nel primo frame del video di uscita.
+Il programma cerca la classe **Hoop** nei primi **300 fotogrammi**, circa 10 secondi
+a 30 FPS, e **si ferma appena trova un canestro valido**. La ricerca avviene durante
+l'elaborazione, un frame alla volta, senza accumulare immagini in memoria né saltare
+fotogrammi. Può quindi trovare un canestro che compare solo al frame 50 o 100.
+
+La soglia predefinita è **`--hoop-confidence 0.3`**, indipendente dalle soglie di
+giocatori e palla. Puoi modificarla con un valore maggiore di 0 e minore o uguale a 1:
+
+```bash
+python main.py --input data/partita.mp4 --hoop-confidence 0.3
+```
+
+Abbassarla può recuperare canestri poco visibili, ma aumenta i falsi positivi.
+Quando trova il canestro, il terminale mostra ad esempio **`Canestro trovato al frame 54!`**.
+Gli indici partono da **0**, come nei JSON: la ricerca copre i frame da 0 a 299.
+Il cerchio verde e il rilevamento dei tiri si attivano dal frame della scoperta;
+i frame precedenti mantengono l'analisi di giocatori, palla e possesso, senza tiri retroattivi.
 
 La telecamera deve essere fissa. Dopo questa ricerca, il rettangolo viene
 **conservato per l'intera partita**: non viene cancellato se Hoop manca nei frame
 successivi e non oscilla con i nuovi rilevamenti. Se sono visibili più canestri,
-viene scelto un solo riferimento, quello con la fiducia più alta nella ricerca
-iniziale. Controlla che il cerchio verde corrisponda al canestro desiderato.
+viene scelto quello con la fiducia più alta **nel primo frame valido**.
+Controlla che il cerchio verde corrisponda al canestro desiderato.
 
-Se nessun canestro viene trovato nei primi 10 frame, il programma segnala il
-problema e continua a elaborare giocatori, palla e possesso. In quel caso non
+Se nessun canestro viene trovato entro 300 frame, il programma stampa un avviso,
+disattiva i tiri e continua a elaborare giocatori, palla e possesso. In quel caso non
 disegna il cerchio del canestro e salva `shots.json` come `[]`. Non ricerca Hoop
-più avanti nel video: scegli una clip che mostri chiaramente il canestro all'inizio.
+più avanti nel video. Se la clip è più corta, cerca in tutti i frame disponibili
+e stampa l'avviso alla fine se il canestro manca.
 
 Un frame senza Player, Ball o altre classi non interrompe l'analisi. I risultati
 assenti vengono gestiti come liste vuote; un canestro già individuato rimane
@@ -318,9 +331,10 @@ python -m unittest discover -s scripts -p "test_*.py" -v
 ```
 
 I test coprono indici dinamici (dizionario/lista e ordine diverso), canestro che
-compare solo nel nono frame, conservazione del riferimento, esclusione delle
-classi estranee, video senza rilevamenti, continuità dei primi dieci fotogrammi,
-JSON e video, oltre a colore, possesso e tiri. I test di integrazione simulano
+compare ai frame 50, 100 e 299, arresto della ricerca entro 300 frame, soglia
+configurabile, conservazione del riferimento, esclusione delle classi estranee,
+video senza rilevamenti e continuità dei fotogrammi. Verificano JSON e video, oltre
+a colore, possesso e tiri dopo la scoperta tardiva. I test di integrazione simulano
 le risposte di YOLO: non misurano l'accuratezza dei tuoi pesi.
 
 Il modello `best.pt` del repository è stato caricato nel cloud: contiene le sette
@@ -336,7 +350,7 @@ una breve clip della tua partita con canestro visibile all'inizio.
 
 - **Modello non trovato:** controlla `models/best.pt` o indica il percorso con `--model`.
 - **Classi mancanti:** usa i pesi addestrati che contengono Player, Ball e Hoop con questi nomi.
-- **Canestro non trovato:** controlla i primi dieci frame e le prestazioni del modello sulla classe Hoop.
+- **Canestro non trovato:** controlla i primi 300 frame e le prestazioni del modello sulla classe Hoop; prova a regolare `--hoop-confidence`.
 - **Frame senza oggetti:** è normale; il programma continua. Il fallback colore può ancora trovare una palla.
 - **JSON della palla vuoto:** nessuna Ball sopra soglia e nessun candidato arancione valido. Verifica il video o regola le soglie/HSV.
 - **Video non leggibile:** controlla il percorso o converti in MP4 con codec H.264 e FPS costanti.

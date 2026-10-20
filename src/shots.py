@@ -3,12 +3,14 @@
 import math  # Misura distanze e verifica i parametri numerici.
 
 
-def detect_hoop(model, frames, hoop_class_id):
-    """Sceglie il canestro più sicuro nei frame iniziali, oppure restituisce None."""
-    migliore = None  # Nessun canestro conosciuto all'inizio del video.
-    fiducia_migliore = -1.0
+def detect_hoop(model, frames, hoop_class_id, confidence=0.3):
+    """Restituisce il canestro più sicuro del primo frame valido, oppure None."""
+    if not 0 < confidence <= 1:
+        raise ValueError("--hoop-confidence deve essere maggiore di 0 e minore o uguale a 1.")
     for frame in frames:
-        risultati = model.predict(frame, classes=[hoop_class_id], conf=0.25, device="cpu", verbose=False)
+        migliore = None  # Confronta i candidati soltanto nel fotogramma corrente.
+        fiducia_migliore = -1.0
+        risultati = model.predict(frame, classes=[hoop_class_id], conf=confidence, device="cpu", verbose=False)
         if not risultati or risultati[0].boxes is None:
             continue  # L'assenza di rilevamenti è normale, non un errore.
         altezza, larghezza = frame.shape[:2]
@@ -21,11 +23,13 @@ def detect_hoop(model, frames, hoop_class_id):
                 continue
             x1, y1, x2, y2 = map(int, coordinate)
             bbox = (max(0, x1), max(0, y1), min(larghezza, x2), min(altezza, y2))
-            if bbox[0] >= bbox[2] or bbox[1] >= bbox[3] or fiducia < 0.25:
+            if bbox[0] >= bbox[2] or bbox[1] >= bbox[3] or fiducia < confidence:
                 continue  # Scarta rettangoli vuoti, fuori immagine o sotto la soglia.
             if fiducia > fiducia_migliore:
-                migliore, fiducia_migliore = bbox, fiducia  # Conserva il risultato anche se nei frame seguenti manca Hoop.
-    return migliore  # Questo rettangolo resta fisso per tutto il video con telecamera fissa.
+                migliore, fiducia_migliore = bbox, fiducia
+        if migliore is not None:
+            return migliore  # Non cerca un altro canestro nei fotogrammi successivi.
+    return None  # La ricerca può riprendere al prossimo frame, entro il limite previsto.
 
 
 def parse_hoop_bbox(value):
