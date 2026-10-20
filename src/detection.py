@@ -23,9 +23,9 @@ def trova_classi_modello(names):
 
 
 def rileva_persone(input_path, output_path, model_path, confidence=0.1, tracks_path="output/tracks.json",
-                   ball_tracks_path="output/ball_tracks.json", ball_confidence=0.25,
+                   ball_tracks_path="output/ball_tracks.json", ball_confidence=0.50,
                    possession_path="output/possession.json", possession_threshold=150.0,
-                   use_color_fallback=True, color_hsv_range=DEFAULT_HSV_RANGE,
+                   use_color_fallback=False, color_hsv_range=DEFAULT_HSV_RANGE,
                    shot_path="output/shots.json", min_shot_speed=5.0, hoop_confidence=0.3):
     input_path = Path(input_path)  # Converte il percorso del video in un oggetto Path.
     output_path = Path(output_path)  # Converte il percorso del risultato.
@@ -131,11 +131,18 @@ def rileva_persone(input_path, output_path, model_path, confidence=0.1, tracks_p
             for box in boxes_palla:  # Salva tutte le palle rilevate, anche se nello stesso frame sono più di una.
                 if int(box.cls.item()) != classi["Ball"]:
                     continue  # Non esporta altre classi nel JSON della palla.
-                x1, y1, x2, y2 = map(int, box.xyxy[0].tolist())  # Legge il rettangolo della palla in pixel.
+                coordinate = box.xyxy[0].tolist()  # Controlla le dimensioni prima di arrotondare i pixel.
+                if not all(math.isfinite(value) for value in coordinate):
+                    continue  # Ignora coordinate non valide.
+                x1, y1, x2, y2 = coordinate
+                area_palla = (x2 - x1) * (y2 - y1)
+                if x2 <= x1 or y2 <= y1 or area_palla > 0.05 * larghezza * altezza:
+                    continue  # Una palla non può occupare più del 5% dell'immagine della partita.
+                x1, y1, x2, y2 = map(int, coordinate)  # Converte il rettangolo valido in pixel interi.
                 fiducia = float(box.conf.item())  # Converte la fiducia YOLO in un numero utilizzabile nel JSON.
                 posizione = {"frame": fotogrammi, "bbox": [x1, y1, x2, y2], "confidence": fiducia}  # Stesso formato dei JSON precedenti.
                 palle_frame.append(posizione)  # Conserva prima i risultati YOLO, senza disegnare sul frame originale.
-            if not palle_frame and use_color_fallback:  # Usa il colore solo se nessuna palla supera --ball-confidence.
+            if not palle_frame and use_color_fallback:  # Solo su richiesta, quando nessuna Ball supera tutti i filtri.
                 bbox_colore = detect_ball_by_color(frame, color_hsv_range)  # Analizza il frame originale, senza cerchi o etichette.
                 if bbox_colore is not None:
                     palle_frame.append({"frame": fotogrammi, "bbox": bbox_colore, "confidence": 0.0, "source": "color"})  # Il colore non fornisce una probabilità YOLO.

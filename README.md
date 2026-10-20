@@ -24,7 +24,7 @@ BallStatsAI/
 ├── src/
 │   ├── __init__.py
 │   ├── detection.py              # Classi dinamiche, tracking, video e JSON
-│   ├── ball_color.py             # Fallback arancione quando manca Ball
+│   ├── ball_color.py             # Fallback arancione opzionale, spento per default
 │   ├── possession.py             # Possesso basato sulla distanza
 │   └── shots.py                  # Canestro automatico e tiri stimati
 ├── scripts/                      # Video dimostrativo e test
@@ -175,21 +175,40 @@ non viene esportato. I rilevamenti Ref non vengono trattati come giocatori,
 ma un'errata classificazione del modello come Player può comunque creare una traccia.
 
 La soglia dei Player è `--confidence 0.1`; quella della palla è separata,
-`--ball-confidence 0.25`. Una soglia più bassa può recuperare oggetti poco visibili,
-ma introduce più falsi positivi. Esempio:
+**`--ball-confidence 0.50`**. Di default la palla viene cercata **solo con il modello
+personalizzato `best.pt`**, usando l'indice di **Ball** ricavato da `model.names`,
+senza usare la classe COCO `sports ball`.
+
+I rettangoli Ball con area **superiore al 5% del frame** vengono scartati prima
+del disegno, del salvataggio JSON e del calcolo di possesso e tiri. L'area è
+`(x2-x1) * (y2-y1)`, confrontata con larghezza × altezza del video.
+Una soglia di confidenza più bassa può recuperare oggetti poco visibili, ma introduce
+più falsi positivi. Il comando con le impostazioni predefinite è:
 
 ```bash
-python main.py --input data/partita.mp4 --ball-confidence 0.15
+python main.py --input data/partita.mp4 --ball-confidence 0.50
 ```
 
-Quando nessun rilevamento Ball supera la soglia, il fallback OpenCV arancione è
-attivo per default. Cerca sul frame originale una forma circolare nel range HSV
+Il fallback OpenCV arancione è **disattivato per default**, per evitare che scarpe,
+divise e altri oggetti arancioni vengano scambiati per il pallone dal filtro colore.
+Se nessuna Ball supera i filtri, il frame resta senza palla: il programma continua
+senza errori e non riutilizza posizioni precedenti. Eventuali falsi positivi del
+modello YOLO restano possibili e vanno verificati sul video.
+
+Per riattivare manualmente il fallback:
+
+```bash
+python main.py --input data/partita.mp4 --use-color-fallback
+```
+
+Quando è attivo, interviene solo se nessuna Ball supera i filtri YOLO e di dimensione.
+Cerca sul frame originale una forma circolare nel range HSV
 `[5,100,100]`–`[15,255,255]`. Scarta puntini, forme troppo squadrate o allungate,
 aree inferiori a 20 pixel quadrati o superiori al 5% del frame. Richiede circolarità
 almeno `0.75`, rapporto larghezza/altezza fra `0.75` e `1.33` e almeno sei vertici
 nel contorno approssimato. Sceglie il candidato più circolare, oppure nessuno.
 
-Per disattivarlo:
+Per mantenerlo esplicitamente disattivato:
 
 ```bash
 python main.py --input data/partita.mp4 --no-use-color-fallback
@@ -199,7 +218,7 @@ Per personalizzare l'HSV passa sei interi, in ordine
 `H_MIN S_MIN V_MIN H_MAX S_MAX V_MAX`:
 
 ```bash
-python main.py --input data/partita.mp4 --color-hsv-range 3 80 70 22 255 255
+python main.py --input data/partita.mp4 --use-color-fallback --color-hsv-range 3 80 70 22 255 255
 ```
 
 In OpenCV H va da 0 a 179, S e V da 0 a 255. Allarga H per includere più tonalità,
@@ -207,8 +226,9 @@ abbassa S per colori meno saturi o V per oggetti più scuri. Restringi gli inter
 per ridurre i falsi positivi. Ogni minimo deve essere minore o uguale al massimo.
 Usa `--no-use-color-fallback`, non `--use-color-fallback False`, per disattivarlo.
 
-Parquet, divise o altri oggetti arancioni possono essere scambiati per la palla.
-YOLO ha sempre la priorità: il colore non aggiunge duplicati nei frame con Ball.
+Con il fallback attivo, parquet, divise o altri oggetti arancioni possono essere
+scambiati per la palla. YOLO ha sempre la priorità: il colore non aggiunge duplicati
+nei frame con Ball che superano tutti i filtri.
 Il terminale conta separatamente i rilevamenti YOLO e i recuperi dal colore.
 
 ## Possesso stimato
@@ -286,7 +306,9 @@ fra loro e dagli altri file dell'analisi.
 
 La fiducia è quella di YOLO. Solo i recuperi dal colore aggiungono `source: "color"`
 e usano `confidence: 0.0`: il metodo a colori non produce una probabilità.
-Tutte le Ball rilevate da YOLO vengono esportate, anche se sono più di una.
+Tutte le Ball che superano la soglia di confidenza e il filtro dimensionale vengono
+esportate, anche se sono più di una. I record `source: "color"` compaiono solo
+quando il fallback è stato attivato manualmente.
 
 `possession.json`, esattamente un record per frame:
 
@@ -334,7 +356,9 @@ I test coprono indici dinamici (dizionario/lista e ordine diverso), canestro che
 compare ai frame 50, 100 e 299, arresto della ricerca entro 300 frame, soglia
 configurabile, conservazione del riferimento, esclusione delle classi estranee,
 video senza rilevamenti e continuità dei fotogrammi. Verificano JSON e video, oltre
-a colore, possesso e tiri dopo la scoperta tardiva. I test di integrazione simulano
+a colore, possesso e tiri dopo la scoperta tardiva. Verificano inoltre che il
+fallback resti spento per default e attivabile manualmente, e che il filtro
+dimensionale scarti le Ball oltre il 5% del frame. I test di integrazione simulano
 le risposte di YOLO: non misurano l'accuratezza dei tuoi pesi.
 
 Il modello `best.pt` del repository è stato caricato nel cloud: contiene le sette
@@ -351,8 +375,8 @@ una breve clip della tua partita con canestro visibile all'inizio.
 - **Modello non trovato:** controlla `models/best.pt` o indica il percorso con `--model`.
 - **Classi mancanti:** usa i pesi addestrati che contengono Player, Ball e Hoop con questi nomi.
 - **Canestro non trovato:** controlla i primi 300 frame e le prestazioni del modello sulla classe Hoop; prova a regolare `--hoop-confidence`.
-- **Frame senza oggetti:** è normale; il programma continua. Il fallback colore può ancora trovare una palla.
-- **JSON della palla vuoto:** nessuna Ball sopra soglia e nessun candidato arancione valido. Verifica il video o regola le soglie/HSV.
+- **Frame senza oggetti:** è normale; il programma continua. Il fallback colore interviene solo se attivato manualmente.
+- **JSON della palla vuoto:** nessuna Ball ha superato confidenza e filtro dimensionale. Verifica il video e il modello, oppure regola `--ball-confidence`.
 - **Video non leggibile:** controlla il percorso o converti in MP4 con codec H.264 e FPS costanti.
 - **Libreria non trovata:** attiva `.venv` e reinstalla `requirements.txt`.
 

@@ -21,9 +21,9 @@ def main():
     parser.add_argument("--possession-threshold", type=float, default=150.0, help="Distanza massima per il possesso in pixel (default: 150)")
     parser.add_argument("--model", type=Path, default=Path("models/best.pt"), help="Pesi personalizzati con le classi Player, Ball e Hoop")
     parser.add_argument("--confidence", type=float, default=0.1, help="Soglia YOLO tra 0 e 1 (default: 0.1, adatta a ByteTrack)")
-    parser.add_argument("--ball-confidence", type=float, default=0.25, help="Soglia della palla tra 0 e 1 (default: 0.25)")
+    parser.add_argument("--ball-confidence", type=float, default=0.50, help="Soglia della palla tra 0 e 1 (default: 0.50)")
     parser.add_argument("--hoop-confidence", type=float, default=0.3, help="Soglia del canestro tra 0 e 1 (default: 0.3); ricerca nei primi 300 frame")
-    parser.add_argument("--use-color-fallback", action=argparse.BooleanOptionalAction, default=True, help="Fallback arancione attivo per default; disattiva con --no-use-color-fallback")
+    parser.add_argument("--use-color-fallback", action=argparse.BooleanOptionalAction, default=False, help="Attiva il fallback arancione (disattivato per default)")
     parser.add_argument("--color-hsv-range", type=int, nargs=6, default=[5, 100, 100, 15, 255, 255], metavar=("H_MIN", "S_MIN", "V_MIN", "H_MAX", "S_MAX", "V_MAX"), help="Sei valori HSV: minimo e massimo (OpenCV)")
     args = parser.parse_args()  # Legge i valori forniti dall'utente.
     if not 0 < args.confidence <= 1:  # Impedisce di usare una soglia non valida.
