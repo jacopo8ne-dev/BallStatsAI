@@ -1,0 +1,9 @@
+# Tracker riservato alla palla; gli indici delle classi provengono da best.pt.
+tracker_type: bytetrack
+track_high_thresh: 0.15
+track_low_thresh: 0.05
+new_track_thresh: 0.15
+track_buffer: 30
+match_thresh: 0.8
+# Non penalizza due volte i rilevamenti deboli durante l'associazione geometrica.
+fuse_score: false

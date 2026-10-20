@@ -2,14 +2,18 @@
 
 import json  # Salva le tracce in un formato leggibile anche da altri programmi.
 import math  # Controlla che la frequenza del video sia un numero valido.
+from collections import deque  # Conserva pochi frame in attesa di una possibile interpolazione.
+import tempfile  # Crea una cartella debug distinta per ogni analisi.
 from pathlib import Path  # Gestisce cartelle e nomi dei file.
 
 import cv2  # OpenCV legge, disegna e salva i fotogrammi del video.
+from ultralytics.utils import ROOT
 from ultralytics import YOLO  # YOLO riconosce gli oggetti nelle immagini.
 
 from src.possession import calcola_possesso  # Collega la palla al giocatore più vicino nello stesso frame.
 from src.ball_color import DEFAULT_HSV_RANGE, detect_ball_by_color, valida_range_hsv  # Recupera palle arancioni non trovate da YOLO.
-from src.shots import ShotDetector, detect_hoop  # Trova il canestro e riconosce l'attraversamento discendente.
+from src.shots import ShotDetector, HoopTracker, parse_hoop_bbox
+from src.ball_tracking import BallTracker, boxes_da_righe, crea_tracker, interpola_palla
 
 
 def trova_classi_modello(names):
@@ -23,10 +27,11 @@ def trova_classi_modello(names):
 
 
 def rileva_persone(input_path, output_path, model_path, confidence=0.1, tracks_path="output/tracks.json",
-                   ball_tracks_path="output/ball_tracks.json", ball_confidence=0.50,
+                   ball_tracks_path="output/ball_tracks.json", ball_confidence=0.05,
                    possession_path="output/possession.json", possession_threshold=150.0,
                    use_color_fallback=False, color_hsv_range=DEFAULT_HSV_RANGE,
-                   shot_path="output/shots.json", min_shot_speed=5.0, hoop_confidence=0.3):
+                   shot_path="output/shots.json", min_shot_speed=5.0, hoop_confidence=0.3,
+                   hoop_bbox=None, skip_frames=1, debug_dir="output/debug"):
     input_path = Path(input_path)  # Converte il percorso del video in un oggetto Path.
     output_path = Path(output_path)  # Converte il percorso del risultato.
     model_path = Path(model_path)  # Converte il percorso dei pesi del modello.
@@ -70,129 +75,189 @@ def rileva_persone(input_path, output_path, model_path, confidence=0.1, tracks_p
     if shot_path.resolve() in (input_path.resolve(), output_path.resolve(), model_path.resolve(), tracks_path.resolve(), ball_tracks_path.resolve(), possession_path.resolve()):
         raise ValueError("Il JSON dei tiri deve essere diverso da tutti gli altri file dell'analisi.")
 
-    video = cv2.VideoCapture(str(input_path))  # Apre il video di ingresso.
-    writer = None  # Il video di uscita sarà aperto dopo aver letto il primo fotogramma.
-    fotogrammi = 0  # Conta i fotogrammi elaborati.
-    rilevamenti = 0  # Conta le posizioni alle quali ByteTrack ha assegnato un ID.
-    tracce = []  # Ogni elemento conterrà frame, ID e rettangolo di una persona.
-    tracce_palla = []  # Ogni elemento conterrà frame, rettangolo e fiducia di una palla rilevata.
-    possessi = []  # Conterrà esattamente un risultato per ogni fotogramma elaborato.
-    try:  # Chiude sempre i file, anche quando si verifica un errore.
-        if not video.isOpened():  # Verifica che OpenCV riesca ad aprire il formato.
+    if not isinstance(skip_frames, int) or isinstance(skip_frames, bool) or skip_frames < 1:
+        raise ValueError("--skip-frames deve essere un intero maggiore o uguale a 1.")
+    if hoop_bbox is not None:
+        hoop_bbox = parse_hoop_bbox(",".join(str(value) for value in hoop_bbox))
+
+    video = cv2.VideoCapture(str(input_path))
+    writer = None
+    tracce, tracce_palla, possessi = [], [], []
+    pending = deque()  # Ritarda l'uscita al massimo di sei frame originali, senza caricare tutta la partita.
+    tiri = None
+    fotogrammi = 0
+    elaborati = 0
+    try:
+        if not video.isOpened():
             raise ValueError("Impossibile aprire il video. Prova un file MP4 leggibile.")
-        successo, frame = video.read()  # Legge il primo fotogramma.
-        if not successo:  # Rifiuta un video vuoto o non decodificabile.
+        successo, frame = video.read()
+        if not successo:
             raise ValueError("Il video non contiene fotogrammi leggibili.")
-        fps = video.get(cv2.CAP_PROP_FPS)  # Legge quanti fotogrammi vengono mostrati al secondo.
-        if not math.isfinite(fps) or fps <= 0:  # Un valore mancante impedisce di preservare la velocità.
+        fps = video.get(cv2.CAP_PROP_FPS)
+        if not math.isfinite(fps) or fps <= 0:
             raise ValueError("La frequenza FPS del video non è valida. Converti il video in MP4.")
-        altezza, larghezza = frame.shape[:2]  # Legge le dimensioni delle immagini.
-        model = YOLO(str(model_path))  # Carica il file personalizzato già presente sul computer.
-        classi = trova_classi_modello(model.names)  # Ricava gli indici di Player, Ball e Hoop dai nomi reali.
-        # Carica gli stessi pesi in una seconda istanza: palla e canestro non modificano lo stato di ByteTrack.
-        modello_palla = YOLO(str(model_path))
-        tiri = None  # Attiva i tiri solo quando viene trovato un canestro valido.
-        output_path.parent.mkdir(parents=True, exist_ok=True)  # Prepara la cartella dei risultati.
-        codec = cv2.VideoWriter_fourcc(*"mp4v")  # Sceglie un codec per salvare un video MP4.
-        writer = cv2.VideoWriter(str(output_path), codec, fps, (larghezza, altezza))  # Crea il video.
-        if not writer.isOpened():  # Controlla che la destinazione sia scrivibile e il codec disponibile.
+        altezza, larghezza = frame.shape[:2]
+        if hoop_bbox is not None and (hoop_bbox[2] > larghezza or hoop_bbox[3] > altezza):
+            raise ValueError("Il canestro manuale deve essere contenuto nelle dimensioni del video.")
+        model = YOLO(str(model_path))  # Una sola istanza, un solo passaggio per frame elaborato.
+        classi = trova_classi_modello(model.names)
+        tracker_giocatori = crea_tracker(ROOT / "cfg/trackers/bytetrack.yaml", skip_frames)
+        tracker_palla = BallTracker(skip_frames)
+        tracker_canestro = HoopTracker(hoop_confidence, hoop_bbox)
+        if hoop_bbox is not None:
+            print(f"Canestro manuale: {hoop_bbox}. Ricerca automatica disattivata.")
+        for path in (output_path, tracks_path, ball_tracks_path, possession_path, shot_path):
+            path.parent.mkdir(parents=True, exist_ok=True)
+        debug_dir = Path(debug_dir)
+        debug_dir.mkdir(parents=True, exist_ok=True)
+        debug_run = Path(tempfile.mkdtemp(prefix=input_path.stem + "_", dir=debug_dir))
+        print(f"Debug canestro: {debug_run.resolve()}")
+        writer = cv2.VideoWriter(str(output_path), cv2.VideoWriter_fourcc(*"mp4v"), fps / skip_frames, (larghezza, altezza))
+        if not writer.isOpened():
             raise RuntimeError("Impossibile creare il video di uscita. Controlla cartella e codec MP4.")
-        tracks_path.parent.mkdir(parents=True, exist_ok=True)  # Prepara la cartella delle tracce prima dell'analisi.
-        ball_tracks_path.parent.mkdir(parents=True, exist_ok=True)  # Prepara anche la cartella del JSON della palla.
-        possession_path.parent.mkdir(parents=True, exist_ok=True)  # Prepara la cartella del possesso prima di elaborare il video.
-        shot_path.parent.mkdir(parents=True, exist_ok=True)  # Prepara la cartella dei tiri prima dell'analisi.
-        while successo:  # Elabora un fotogramma alla volta per contenere l'uso di memoria.
-            # Cerca sull'immagine originale, senza accumulare 300 frame in memoria.
-            if tiri is None and fotogrammi < 300:
-                hoop_bbox = detect_hoop(modello_palla, [frame], classi["Hoop"], hoop_confidence)
-                if hoop_bbox is not None:
-                    tiri = ShotDetector(hoop_bbox, fps, min_shot_speed)
-                    print(f"Canestro trovato al frame {fotogrammi}! Riferimento fisso: {hoop_bbox}.")
-                elif fotogrammi == 299:  # I primi 300 frame hanno indici da 0 a 299.
-                    print("Avviso: canestro non trovato nei primi 300 frame. Tiri disattivati; continuo con giocatori, palla e possesso.")
-            giocatori_frame = []  # Azzera i giocatori da confrontare in questo fotogramma.
-            palle_frame = []  # Non riutilizza una palla rilevata in un fotogramma passato.
-            # persist=True conserva lo stesso tracker tra i fotogrammi invece di ricreare gli ID ogni volta.
-            # La soglia bassa lascia a ByteTrack anche rilevamenti meno sicuri, utili per recuperare una traccia.
-            risultati = model.track(frame, persist=True, tracker="bytetrack.yaml", classes=[classi["Player"]], conf=confidence, device="cpu", verbose=False)
-            # Cerca soltanto Ball sul fotogramma originale, prima di disegnare le annotazioni.
-            risultati_palla = modello_palla.predict(frame, classes=[classi["Ball"]], conf=ball_confidence, device="cpu", verbose=False)
-            boxes_giocatori = risultati[0].boxes if risultati and risultati[0].boxes is not None else []
-            boxes_palla = risultati_palla[0].boxes if risultati_palla and risultati_palla[0].boxes is not None else []
-            for box in boxes_giocatori:  # Esclude arbitri, orologi, sovrimpressioni e tabelloni.
-                if int(box.cls.item()) != classi["Player"] or box.id is None:
-                    continue  # Non inventa ID e non esporta posizioni prive di identità.
-                giocatore_id = int(box.id.item())  # Converte l'ID di ByteTrack in un normale intero Python.
-                x1, y1, x2, y2 = map(int, box.xyxy[0].tolist())  # Legge gli angoli del rettangolo.
-                posizione = {"frame": fotogrammi, "id": giocatore_id, "bbox": [x1, y1, x2, y2]}  # Stesso formato delle tracce precedenti.
-                giocatori_frame.append(posizione)  # Tiene i giocatori del frame disponibili per il possesso e il disegno.
-                tracce.append(posizione)  # Conserva anche la traccia completa per il JSON dei giocatori.
-                rilevamenti += 1  # Conta una posizione con ID esportata nel JSON.
-            for box in boxes_palla:  # Salva tutte le palle rilevate, anche se nello stesso frame sono più di una.
-                if int(box.cls.item()) != classi["Ball"]:
-                    continue  # Non esporta altre classi nel JSON della palla.
-                coordinate = box.xyxy[0].tolist()  # Controlla le dimensioni prima di arrotondare i pixel.
-                if not all(math.isfinite(value) for value in coordinate):
-                    continue  # Ignora coordinate non valide.
-                x1, y1, x2, y2 = coordinate
-                area_palla = (x2 - x1) * (y2 - y1)
-                if x2 <= x1 or y2 <= y1 or area_palla > 0.05 * larghezza * altezza:
-                    continue  # Una palla non può occupare più del 5% dell'immagine della partita.
-                x1, y1, x2, y2 = map(int, coordinate)  # Converte il rettangolo valido in pixel interi.
-                fiducia = float(box.conf.item())  # Converte la fiducia YOLO in un numero utilizzabile nel JSON.
-                posizione = {"frame": fotogrammi, "bbox": [x1, y1, x2, y2], "confidence": fiducia}  # Stesso formato dei JSON precedenti.
-                palle_frame.append(posizione)  # Conserva prima i risultati YOLO, senza disegnare sul frame originale.
-            if not palle_frame and use_color_fallback:  # Solo su richiesta, quando nessuna Ball supera tutti i filtri.
-                bbox_colore = detect_ball_by_color(frame, color_hsv_range)  # Analizza il frame originale, senza cerchi o etichette.
-                if bbox_colore is not None:
-                    palle_frame.append({"frame": fotogrammi, "bbox": bbox_colore, "confidence": 0.0, "source": "color"})  # Il colore non fornisce una probabilità YOLO.
-            for posizione in palle_frame:  # Disegna ed esporta allo stesso modo sia YOLO sia il fallback.
-                x1, y1, x2, y2 = posizione["bbox"]  # Legge il rettangolo del metodo selezionato.
-                centro = ((x1 + x2) // 2, (y1 + y2) // 2)  # Calcola il centro del rettangolo.
-                raggio = max(1, (max(x2 - x1, y2 - y1) + 1) // 2)  # Usa metà del lato più lungo come raggio.
-                cv2.circle(frame, centro, raggio, (0, 0, 255), 2)  # OpenCV usa BGR: questo colore è rosso.
-                cv2.putText(frame, "PALLA", (x1, max(20, y1 - 8)), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)  # Etichetta la palla.
-                tracce_palla.append(posizione)  # Offre al JSON e al possesso anche le palle recuperate dal colore.
-            possesso = calcola_possesso(giocatori_frame, palle_frame, fotogrammi, possession_threshold)  # Confronta i centri solo in questo frame.
-            possessi.append(possesso)  # Registra anche i frame con possessore null.
-            for giocatore in giocatori_frame:  # Disegna i giocatori dopo aver stabilito chi ha il possesso.
-                x1, y1, x2, y2 = giocatore["bbox"]  # Recupera il rettangolo senza modificare la traccia.
-                ha_palla = giocatore["id"] == possesso["player_id"]  # Al massimo un giocatore è selezionato.
-                colore = (0, 255, 255) if ha_palla else (0, 255, 0)  # Giallo per il possessore, verde per gli altri (BGR).
-                etichetta = f"ID: {giocatore['id']}" + (" PALLA" if ha_palla else "")  # Aggiunge PALLA accanto all'ID.
-                cv2.rectangle(frame, (x1, y1), (x2, y2), colore, 2)  # Evidenzia il possessore stimato.
-                cv2.putText(frame, etichetta, (x1, max(20, y1 - 8)), cv2.FONT_HERSHEY_SIMPLEX, 0.6, colore, 2)  # Mostra l'etichetta corrispondente.
-            if tiri is not None:  # Senza un canestro conosciuto non inventa tiri né coordinate.
-                messaggio_tiro = tiri.update(fotogrammi, palle_frame, possesso)
-                hx1, hy1, hx2, hy2 = tiri.hoop  # Riusa sempre il canestro iniziale, anche quando è nascosto.
-                centro_canestro = ((hx1 + hx2) // 2, (hy1 + hy2) // 2)
-                raggio_canestro = max(1, round(math.hypot(hx2 - hx1, hy2 - hy1) / 2))
-                cv2.circle(frame, centro_canestro, raggio_canestro, (0, 255, 0), 2)  # Evidenzia il canestro automatico in verde.
-                if messaggio_tiro:
-                    cv2.putText(frame, messaggio_tiro, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
-            writer.write(frame)  # Aggiunge il fotogramma con i rettangoli al video di uscita.
-            fotogrammi += 1  # Aggiorna il numero di fotogrammi elaborati.
-            if fotogrammi % 100 == 0:  # Comunica l'avanzamento durante i video lunghi.
-                print(f"Elaborati {fotogrammi} fotogrammi...")  # Mostra il progresso nel terminale.
-            successo, frame = video.read()  # Ogni frame viene elaborato una sola volta.
-    finally:  # Libera le risorse anche in caso di interruzione.
-        video.release()  # Chiude il video di ingresso.
-        if writer is not None:  # Chiude l'uscita soltanto se è stata creata.
-            writer.release()  # Completa la scrittura del file MP4.
+        while successo:
+            processato = fotogrammi % skip_frames == 0
+            hoops = []  # Rilevamenti attuali: non confonderli con il canestro conservato.
+            if processato:
+                richieste = [classi["Player"], classi["Ball"]]
+                if hoop_bbox is None:
+                    richieste.append(classi["Hoop"])
+                # Nel debug mostriamo anche Hoop sotto soglia, fino al limite diagnostico 0.01.
+                soglia = min(confidence, ball_confidence, hoop_confidence, 0.01 if fotogrammi < 150 else 1.0)
+                results = model.predict(frame, classes=richieste, conf=soglia, device="cpu", verbose=False)
+                groups = separa_rilevamenti(results, classi, frame.shape[:2])
+                players = [row for row in groups["Player"] if row[4] >= confidence]
+                balls = [row for row in groups["Ball"] if row[4] >= ball_confidence
+                         and (row[2]-row[0]) * (row[3]-row[1]) <= 0.05 * larghezza * altezza]
+                hoops = groups["Hoop"] if hoop_bbox is None else []
+                canestro = tracker_canestro.update(hoops, fotogrammi)
+                tracks = tracker_giocatori.update(boxes_da_righe(players, frame.shape[:2]))
+                giocatori = [{"frame": fotogrammi, "id": int(track[4]),
+                              "bbox": [int(value) for value in track[:4]]} for track in tracks]
+                previous = tracker_palla.last
+                palla = tracker_palla.update(balls, fotogrammi, frame.shape[:2])
+                # Il nuovo punto permette di ricostruire SOLO i frame ancora in attesa.
+                interpolated = interpola_palla(previous, palla, [item["frame"] for item in pending])
+                for item in pending:
+                    if item["frame"] in interpolated:
+                        item["ball"] = interpolated[item["frame"]]
+                if palla is None and use_color_fallback:
+                    bbox_colore = detect_ball_by_color(frame, color_hsv_range)
+                    if bbox_colore is not None and tracker_palla.movimento_valido(bbox_colore, fotogrammi):
+                        palla = {"frame": fotogrammi, "id": None, "tracker_id": None, "bbox": bbox_colore,
+                                 "confidence": 0.0, "source": "color"}  # Il colore non aggiorna ByteTrack né ancora l'interpolazione.
+                pending.append({"frame": fotogrammi, "image": frame, "players": giocatori,
+                                "ball": palla, "hoop": canestro})
+                elaborati += 1
+            if fotogrammi < 150:
+                salva_debug_canestro(frame, fotogrammi, hoops, tracker_canestro.current,
+                                     hoop_confidence, processato, debug_run)
+            # Un punto futuro non può più riempire questo frame entro il limite di cinque mancanti.
+            while pending and fotogrammi - pending[0]["frame"] >= 6:
+                tiri = scrivi_frame(pending.popleft(), writer, tiri, fps, min_shot_speed, skip_frames,
+                                   possession_threshold, tracce, tracce_palla, possessi)
+            fotogrammi += 1
+            if fotogrammi % 100 == 0:
+                print(f"Letti {fotogrammi} fotogrammi, inferenze YOLO: {elaborati}...")
+            successo, frame = video.read()
+        while pending:  # A fine video non inventiamo il punto futuro: i buchi finali restano vuoti.
+            tiri = scrivi_frame(pending.popleft(), writer, tiri, fps, min_shot_speed, skip_frames,
+                               possession_threshold, tracce, tracce_palla, possessi)
+    finally:
+        video.release()
+        if writer is not None:
+            writer.release()
     if tiri is not None:
-        tiri.finish_video(fotogrammi)  # Esclude i candidati rimasti in volo alla fine della registrazione.
-    elif fotogrammi < 300:  # Segnala anche il caso di un video breve senza canestro.
-        print(f"Avviso: canestro non trovato nei {fotogrammi} frame disponibili. Tiri disattivati; shots.json sarà vuoto.")
-    with shot_path.open("w", encoding="utf-8") as file:
-        json.dump(tiri.shots if tiri is not None else [], file, indent=2, allow_nan=False)
-    if tiri is not None:
-        print(f"Tiri: {len(tiri.shots)} con esito stimato, {tiri.unresolved} non classificabili (esclusi dal JSON).")
-    with tracks_path.open("w", encoding="utf-8") as file:  # Scrive il JSON solo se l'analisi termina senza errori.
-        json.dump(tracce, file, indent=2)  # Salva una lista di oggetti; senza persone viene salvata la lista vuota [].
-    with ball_tracks_path.open("w", encoding="utf-8") as file:  # Salva la palla in un file indipendente.
-        json.dump(tracce_palla, file, indent=2)  # Se la palla non viene mai rilevata, il JSON contiene [].
-    with possession_path.open("w", encoding="utf-8") as file:  # Salva un record per ogni frame al termine dell'analisi.
-        json.dump(possessi, file, indent=2, allow_nan=False)  # Usa solo numeri JSON validi, senza NaN o Infinity.
-    recuperate = sum(posizione.get("source") == "color" for posizione in tracce_palla)  # Conta il contributo del fallback.
-    print(f"Palla: {len(tracce_palla) - recuperate} rilevamenti YOLO, {recuperate} recuperati dal colore.")  # Aiuta a confrontare i metodi sul proprio video.
-    return fotogrammi, rilevamenti  # Restituisce il riepilogo al programma principale.
+        tiri.finish_video(fotogrammi)
+        print(f"Tiri: {len(tiri.shots)} con esito stimato, {tiri.unresolved} non classificabili.")
+    else:
+        print("Avviso: canestro mai trovato. shots.json sarà vuoto; prova --hoop-bbox.")
+    for path, records in ((tracks_path, tracce), (ball_tracks_path, tracce_palla),
+                          (possession_path, possessi), (shot_path, tiri.shots if tiri else [])):
+        with path.open("w", encoding="utf-8") as file:
+            json.dump(records, file, indent=2, allow_nan=False)
+    for source in ("yolo", "interpolated", "color"):
+        print(f"Palla {source}: {sum(item['source'] == source for item in tracce_palla)} posizioni.")
+    print(f"Frame originali: {fotogrammi}; frame elaborati e salvati: {elaborati}.")
+    return elaborati, len(tracce)
+
+
+def separa_rilevamenti(results, classi, shape):
+    """Divide l'unica risposta YOLO per classe e scarta coordinate non utilizzabili."""
+    groups = {name: [] for name in classi}
+    if not results or results[0].boxes is None:
+        return groups
+    altezza, larghezza = shape
+    for box in results[0].boxes:
+        class_id = int(box.cls.item())
+        for name, indice in classi.items():
+            if class_id != indice:
+                continue
+            coords = box.xyxy[0].tolist()
+            score = float(box.conf.item())
+            if not all(math.isfinite(value) for value in coords + [score]):
+                continue
+            x1, y1, x2, y2 = coords
+            if x1 < 0 or y1 < 0 or x2 > larghezza or y2 > altezza or x2 <= x1 or y2 <= y1 or not 0 <= score <= 1:
+                continue
+            groups[name].append([x1, y1, x2, y2, score, class_id])
+    return groups
+
+
+def salva_debug_canestro(image, frame, detections, hoop, threshold, processed, directory):
+    """Salva il frame originale con candidati grezzi e riferimento conservato, ben distinti."""
+    debug = image.copy()
+    status = "INFERENZA" if processed else "SALTATO: nessuna inferenza"
+    cv2.putText(debug, f"Frame {frame} - {status}", (10,20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255,255,255), 1)
+    for row in detections:
+        x1, y1, x2, y2 = map(int, row[:4])
+        color = (0,255,0) if row[4] >= threshold else (0,165,255)
+        cv2.rectangle(debug, (x1,y1), (x2,y2), color, 2)
+        cv2.putText(debug, f"Hoop {row[4]:.3f}" + (" SOTTO SOGLIA" if row[4] < threshold else " CANDIDATO"),
+                    (x1,max(40,y1-5)), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
+    if not detections:
+        cv2.putText(debug, "Nessun Hoop corrente", (10,40), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255,255,255), 1)
+    if hoop is not None:
+        x1, y1, x2, y2 = hoop["bbox"]
+        cv2.rectangle(debug, (x1,y1), (x2,y2), (255,255,0), 1)
+        confidence = "manuale" if hoop["confidence"] is None else f"conf {hoop['confidence']:.3f}"
+        cv2.putText(debug, f"Riferimento frame {hoop['frame']} {confidence}", (10,60),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255,255,0), 1)
+    if not cv2.imwrite(str(directory / f"frame_{frame:06d}.jpg"), debug):
+        raise OSError(f"Impossibile salvare il debug del frame {frame} in {directory}.")
+
+
+def scrivi_frame(record, writer, tiri, fps, min_shot_speed, skip_frames, threshold, tracks, balls, possessions):
+    """Disegna e calcola le statistiche dopo aver completato l'eventuale interpolazione."""
+    frame = record["image"]
+    numero = record["frame"]
+    palle = [record["ball"]] if record["ball"] is not None else []
+    possesso = calcola_possesso(record["players"], palle, numero, threshold)
+    possessions.append(possesso)
+    tracks.extend(record["players"])
+    balls.extend(palle)
+    for ball in palle:
+        x1, y1, x2, y2 = map(int, ball["bbox"])
+        cv2.circle(frame, ((x1+x2)//2, (y1+y2)//2), max(1, (max(x2-x1,y2-y1)+1)//2), (0,0,255), 2)
+        label = "PALLA" + (" INTERPOLATA" if ball["source"] == "interpolated" else "")
+        cv2.putText(frame, label, (x1,max(20,y1-8)), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0,0,255), 2)
+    for player in record["players"]:
+        x1, y1, x2, y2 = player["bbox"]
+        owner = player["id"] == possesso["player_id"]
+        color = (0,255,255) if owner else (0,255,0)
+        cv2.rectangle(frame, (x1,y1), (x2,y2), color, 2)
+        cv2.putText(frame, f"ID: {player['id']}" + (" PALLA" if owner else ""),
+                    (x1,max(20,y1-8)), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
+    if record["hoop"] is not None:
+        bbox = record["hoop"]["bbox"]
+        if tiri is None:
+            tiri = ShotDetector(bbox, fps, min_shot_speed, frame_step=skip_frames)
+        else:
+            tiri.set_hoop(bbox, numero)  # Usa il riferimento valido per questo frame, non uno scoperto nel futuro.
+        message = tiri.update(numero, palle, possesso)
+        x1, y1, x2, y2 = bbox
+        cv2.circle(frame, ((x1+x2)//2,(y1+y2)//2), max(1,round(math.hypot(x2-x1,y2-y1)/2)), (0,255,0), 2)
+        if message:
+            cv2.putText(frame, message, (10,30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0,255,0), 2)
+    writer.write(frame)
+    return tiri

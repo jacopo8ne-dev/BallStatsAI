@@ -89,6 +89,24 @@ class TestTiri(unittest.TestCase):
         self.sequence([(100,150), None, (100,120)], [7,None,None])
         self.assertIsNone(self.detector.active)
 
+    def test_interpolazione_non_conferma_canestro(self):
+        self.sequence([(100,150), (100,140), (100,70)])
+        interpolated = ball(100,95)
+        interpolated[0]["source"] = "interpolated"
+        self.detector.update(3, interpolated, {"player_id":None})
+        self.detector.update(4, ball(100,105), {"player_id":None})
+        self.detector.finish_video(5)
+        self.assertEqual(self.detector.shots, [])
+        self.assertEqual(self.detector.unresolved, 1)
+
+    def test_canestro_che_si_sposta_non_conferma_tiro_in_corso(self):
+        self.sequence([(100,150), (100,140)])
+        self.detector.set_hoop((190,90,210,100),2)
+        self.assertIsNone(self.detector.active)
+        self.assertEqual(self.detector.unresolved,1)
+        self.assertEqual(self.detector.shots,[])
+        self.assertEqual(self.detector.hoop,(190,90,210,100))
+
     def test_parametri_non_validi(self):
         for value in ["1,2,3", "3,2,1,4", "-1,2,3,4", "1,2,nan,4", "1.5,2,3,4"]:
             with self.subTest(value=value):
