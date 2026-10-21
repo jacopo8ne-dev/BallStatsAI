@@ -127,14 +127,19 @@ class TestModelloPersonalizzato(unittest.TestCase):
         detections = {0:[row(1,[100,100,110,110])],6:[row(1,[112,100,122,110])]}
         with TemporaryDirectory() as directory:
             _, records, images, _, _ = run_pipeline(Path(directory),detections,10)
-        self.assertEqual([r["frame"] for r in records["balls"]],list(range(7)))
-        self.assertEqual([r["source"] for r in records["balls"]], ["yolo"]+["interpolated"]*5+["yolo"])
-        for index, record in enumerate(records["balls"]):
+        self.assertEqual([r["frame"] for r in records["balls"]],list(range(10)))
+        self.assertEqual([r["source"] for r in records["balls"]],
+                         ["yolo"]+["interpolated"]*5+["yolo"]+["predicted"]*3)
+        self.assertEqual([r["estimated"] for r in records["balls"]],[False]+[True]*5+[False]+[True]*3)
+        for index, record in enumerate(records["balls"][:7]):
             self.assertAlmostEqual(record["bbox"][0],100+2*index)
+        self.assertGreater(records["balls"][7]["bbox"][0],112)  # La stima prosegue il moto verso destra.
         for index, image in enumerate(images):
-            region = image[85:125,85:135]
+            region = image[85:125,85:145]
             red = (region[:,:,2]>150) & (region[:,:,0]<100) & (region[:,:,1]<100)
-            self.assertEqual(bool(red.sum()>10), index <= 6)
+            orange = (region[:,:,2]>150) & (region[:,:,0]<100) & (region[:,:,1]>120) & (region[:,:,1]<210)
+            self.assertEqual(bool(red.sum()>10), index in (0,6))  # Rilevamenti YOLO: cerchio rosso pieno.
+            self.assertEqual(bool(orange.sum()>10), index not in (0,6))  # Stime: tratteggio arancione.
         self.assertTrue(all(r["player_id"] is None for r in records["possession"]))
 
     def test_debug_canestro_sotto_soglia_e_aggiornamento(self):

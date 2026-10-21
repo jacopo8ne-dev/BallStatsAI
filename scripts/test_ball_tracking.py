@@ -1,7 +1,7 @@
-"""Prove del tracker della palla: previsione, finestra di ricerca, punti statici e interpolazione."""
+"""Prove del tracker della palla: Kalman, memoria dell'ID, stima, punti statici e interpolazione."""
 
 import unittest
-from src.ball_tracking import BallTracker, forma_da_palla, interpola_palla, vicino_a_giocatore
+from src.ball_tracking import BallTracker, KalmanPalla, forma_da_palla, interpola_palla, vicino_a_giocatore
 
 
 def candidate(x, confidence=0.2, y=100):
@@ -32,22 +32,49 @@ class TestBallTracking(unittest.TestCase):
         self.assertTrue(tracker.movimento_valido(candidate(300)[:4],8))
         self.assertFalse(tracker.movimento_valido(candidate(100)[:4],8))
 
-    def test_candidato_lontano_debole_ignorato_forte_accettato(self):
+    def test_kalman_velocita_e_accelerazione(self):
+        kalman=KalmanPalla(0,0)
+        for frame in range(1,15):
+            kalman.predict(1)
+            kalman.update(10*frame,frame*frame)  # x a velocità costante, y accelerata (a=2).
+        kalman.predict(1)
+        x,y=kalman.posizione
+        self.assertAlmostEqual(x,150,delta=3)
+        self.assertAlmostEqual(y,225,delta=6)
+        self.assertLess(kalman.mahalanobis2(150,225),kalman.mahalanobis2(250,225))
+
+    def test_candidato_lontano_debole_ignorato_forte_stesso_id(self):
         tracker=BallTracker()
         first=tracker.update([candidate(100)],0)
         self.assertIsNone(tracker.update([candidate(600,.1)],1))
         jumped=tracker.update([candidate(600,.5)],2)
-        self.assertIsNotNone(jumped)  # Una palla sicura lontana sostituisce la traccia.
-        self.assertNotEqual(first["id"],jumped["id"])
+        self.assertEqual(jumped["bbox"][0],600)  # Una palla sicura lontana viene accettata...
+        self.assertEqual(first["id"],jumped["id"])  # ...ed è la stessa palla: stesso id.
 
-    def test_perdita_lunga_riparte(self):
+    def test_stima_trenta_frame_e_memoria_150(self):
         tracker=BallTracker(fps=30)
-        first=tracker.update([candidate(100)],0)
-        self.assertTrue(tracker.attivo(30))
-        self.assertFalse(tracker.attivo(31))
-        # Dopo la scadenza nessun limite di distanza: la palla viene ritrovata ovunque.
-        recovered=tracker.update([candidate(900)],40)
-        self.assertNotEqual(first["id"],recovered["id"])
+        for frame in range(5):
+            first=tracker.update([candidate(100+10*frame)],frame)
+        guess=tracker.stima(5,(600,1000))
+        self.assertEqual((guess["source"],guess["estimated"],guess["id"]),("predicted",True,first["id"]))
+        self.assertGreater(guess["bbox"][0],first["bbox"][0])  # Prosegue nella direzione del moto.
+        for frame in range(5,34):
+            self.assertIsNone(tracker.update([],frame))
+        self.assertIsNotNone(tracker.stima(34,(600,1000)))  # 30 frame dopo l'ultima osservazione.
+        self.assertIsNone(tracker.stima(35,(600,1000)))  # Oltre 30 frame non si disegna più...
+        self.assertTrue(tracker.attivo(154))  # ...ma l'id resta in memoria per 150 frame.
+        recovered=tracker.update([candidate(700)],150)
+        self.assertEqual(recovered["id"],first["id"])  # Ri-associata dopo 5 secondi di occlusione.
+        self.assertFalse(tracker.attivo(301))
+        renewed=tracker.update([candidate(700)],301)
+        self.assertNotEqual(renewed["id"],first["id"])
+
+    def test_stima_dentro_immagine(self):
+        tracker=BallTracker()
+        tracker.update([candidate(950)],0)
+        tracker.update([candidate(975,.06)],1)
+        guess=tracker.stima(10,(600,1000))
+        self.assertLessEqual(guess["bbox"][2],1000)
 
     def test_punto_statico_ignorato(self):
         tracker=BallTracker(fps=10)  # Statico dopo 10 osservazioni distribuite su almeno 1 secondo (10 frame).
@@ -82,18 +109,19 @@ class TestBallTracking(unittest.TestCase):
         tracker.update([candidate(100,.06)],0)
         self.assertIsNotNone(tracker.update([candidate(110,.06)],2))
 
-    def test_buchi_da_uno_a_cinque_non_estrapolati(self):
-        for missing in range(1,7):
+    def test_buchi_da_uno_a_ventinove(self):
+        for missing in (1,5,29,30):
             tracker=BallTracker()
             first=tracker.update([candidate(100)],0)
             for frame in range(1,missing+1):
                 tracker.update([],frame)
             last=tracker.update([candidate(112)],missing+1)
             filled=interpola_palla(first,last,range(missing+3))
-            self.assertEqual(len(filled),missing if missing<=5 else 0)
+            self.assertEqual(len(filled),missing if missing<=29 else 0)
             if filled:
                 self.assertAlmostEqual(filled[1]["bbox"][0],100+12/(missing+1))
-                self.assertEqual(filled[1]["source"],"interpolated")
+                self.assertEqual((filled[1]["source"],filled[1]["estimated"]),("interpolated",True))
+            self.assertFalse(first["estimated"])
             self.assertEqual(interpola_palla(first,None,[1]),{})
             self.assertEqual(interpola_palla(None,last,[1]),{})
 
