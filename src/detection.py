@@ -13,7 +13,7 @@ from ultralytics import YOLO  # YOLO riconosce gli oggetti nelle immagini.
 from src.possession import calcola_possesso  # Collega la palla al giocatore più vicino nello stesso frame.
 from src.ball_color import DEFAULT_HSV_RANGE, detect_ball_by_color, valida_range_hsv  # Recupera palle arancioni non trovate da YOLO.
 from src.shots import ShotDetector, HoopTracker, parse_hoop_bbox
-from src.ball_tracking import BallTracker, boxes_da_righe, crea_tracker, interpola_palla
+from src.ball_tracking import MAX_BUCO_INTERPOLATO, BallTracker, boxes_da_righe, crea_tracker, interpola_palla
 
 
 def trova_classi_modello(names):
@@ -85,7 +85,7 @@ def rileva_persone(input_path, output_path, model_path, confidence=0.1, tracks_p
     video = cv2.VideoCapture(str(input_path))
     writer = None
     tracce, tracce_palla, possessi = [], [], []
-    pending = deque()  # Ritarda l'uscita al massimo di sei frame originali, senza caricare tutta la partita.
+    pending = deque()  # Ritarda l'uscita al massimo di 30 frame originali, senza caricare tutta la partita.
     tiri = None
     fotogrammi = 0
     elaborati = 0
@@ -147,15 +147,19 @@ def rileva_persone(input_path, output_path, model_path, confidence=0.1, tracks_p
                     bbox_colore = detect_ball_by_color(frame, color_hsv_range)
                     if bbox_colore is not None and tracker_palla.movimento_valido(bbox_colore, fotogrammi):
                         palla = {"frame": fotogrammi, "id": None, "tracker_id": None, "bbox": bbox_colore,
-                                 "confidence": 0.0, "source": "color"}  # Il colore non aggiorna il tracker né ancora l'interpolazione.
+                                 "confidence": 0.0, "source": "color", "estimated": False}  # Il colore non aggiorna il tracker né ancora l'interpolazione.
+                if palla is None:
+                    # Il filtro di Kalman stima dove si trova la palla nascosta. Se la palla riappare
+                    # entro 29 frame, l'interpolazione fra le due osservazioni sostituirà la stima.
+                    palla = tracker_palla.stima(fotogrammi, frame.shape[:2])
                 pending.append({"frame": fotogrammi, "image": frame, "players": giocatori,
                                 "ball": palla, "hoop": canestro})
                 elaborati += 1
             if fotogrammi < 150:
                 salva_debug_canestro(frame, fotogrammi, hoops, tracker_canestro.current,
                                      hoop_confidence, processato, debug_run)
-            # Un punto futuro non può più riempire questo frame entro il limite di cinque mancanti.
-            while pending and fotogrammi - pending[0]["frame"] >= 6:
+            # Un punto futuro non può più riempire questo frame entro il limite di 29 mancanti.
+            while pending and fotogrammi - pending[0]["frame"] > MAX_BUCO_INTERPOLATO:
                 tiri = scrivi_frame(pending.popleft(), writer, tiri, fps, min_shot_speed, skip_frames,
                                    possession_threshold, tracce, tracce_palla, possessi)
             fotogrammi += 1
@@ -178,7 +182,7 @@ def rileva_persone(input_path, output_path, model_path, confidence=0.1, tracks_p
                           (possession_path, possessi), (shot_path, tiri.shots if tiri else [])):
         with path.open("w", encoding="utf-8") as file:
             json.dump(records, file, indent=2, allow_nan=False)
-    for source in ("yolo", "interpolated", "color"):
+    for source in ("yolo", "interpolated", "predicted", "color"):
         print(f"Palla {source}: {sum(item['source'] == source for item in tracce_palla)} posizioni.")
     print(f"Frame originali: {fotogrammi}; frame elaborati e salvati: {elaborati}.")
     return elaborati, len(tracce)
@@ -229,6 +233,14 @@ def salva_debug_canestro(image, frame, detections, hoop, threshold, processed, d
         raise OSError(f"Impossibile salvare il debug del frame {frame} in {directory}.")
 
 
+def cerchio_tratteggiato(image, center, radius, color, segments=12):
+    """OpenCV non ha cerchi tratteggiati: disegna archi alternati a spazi vuoti."""
+    step = 360 / segments
+    for index in range(segments):
+        start = index * step
+        cv2.ellipse(image, center, (radius, radius), 0, start, start + step / 2, color, 2)
+
+
 def scrivi_frame(record, writer, tiri, fps, min_shot_speed, skip_frames, threshold, tracks, balls, possessions):
     """Disegna e calcola le statistiche dopo aver completato l'eventuale interpolazione."""
     frame = record["image"]
@@ -240,9 +252,16 @@ def scrivi_frame(record, writer, tiri, fps, min_shot_speed, skip_frames, thresho
     balls.extend(palle)
     for ball in palle:
         x1, y1, x2, y2 = map(int, ball["bbox"])
-        cv2.circle(frame, ((x1+x2)//2, (y1+y2)//2), max(1, (max(x2-x1,y2-y1)+1)//2), (0,0,255), 2)
-        label = "PALLA" + (" INTERPOLATA" if ball["source"] == "interpolated" else "")
-        cv2.putText(frame, label, (x1,max(20,y1-8)), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0,0,255), 2)
+        center = ((x1+x2)//2, (y1+y2)//2)
+        if ball.get("estimated"):
+            # Posizione stimata, non vista da YOLO: cerchio arancione tratteggiato.
+            cerchio_tratteggiato(frame, center, max(10, (max(x2-x1,y2-y1)+1)//2), (0,165,255))
+            label = "PALLA INTERPOLATA" if ball["source"] == "interpolated" else "PALLA STIMATA"
+            color = (0,165,255)
+        else:
+            cv2.circle(frame, center, max(1, (max(x2-x1,y2-y1)+1)//2), (0,0,255), 2)
+            label, color = "PALLA", (0,0,255)
+        cv2.putText(frame, label, (x1,max(20,y1-8)), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
     for player in record["players"]:
         x1, y1, x2, y2 = player["bbox"]
         owner = player["id"] == possesso["player_id"]

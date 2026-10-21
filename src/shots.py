@@ -101,8 +101,8 @@ class ShotDetector:
         """Riceve le tracce del frame corrente e restituisce l'eventuale etichetta del tiro."""
         x1, y1, x2, y2 = self.hoop
         hoop_x, hoop_y = (x1 + x2) / 2, (y1 + y2) / 2
-        # L'interpolazione migliora il video e il possesso, ma non prova un attraversamento del ferro.
-        balls = [ball for ball in balls if ball.get("source") != "interpolated"]
+        # Interpolazione e predizione migliorano video e possesso, ma non provano un attraversamento del ferro.
+        balls = [ball for ball in balls if ball.get("source") not in ("interpolated", "predicted")]
         ball = max(balls, key=lambda item: item["confidence"]) if balls else None  # Come per il possesso, sceglie la palla più sicura.
         if self.active is not None:
             if frame - self.active["frame"] > self.max_flight or frame - self.last_seen > self.max_gap:

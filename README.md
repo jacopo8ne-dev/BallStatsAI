@@ -11,8 +11,9 @@ nomi; se mancano, il programma mostra un messaggio che elenca quelle mancanti.
 `model.names` può essere sia un dizionario sia una lista.
 
 Il video risultante mostra rettangoli verdi e ID sui giocatori, un cerchio rosso
-con `PALLA` sul pallone e un cerchio verde sul canestro. Le posizioni ricostruite
-sono etichettate `PALLA INTERPOLATA`. Il possessore
+con `PALLA` sul pallone e un cerchio verde sul canestro. Le posizioni stimate, non viste
+da YOLO, hanno un cerchio arancione tratteggiato con `PALLA INTERPOLATA` o
+`PALLA STIMATA`. Il possessore
 stimato diventa giallo e i tiri vengono indicati con `TIRO!` ed esito stimato.
 Funziona sulla CPU, senza una scheda grafica dedicata.
 
@@ -191,7 +192,7 @@ Con questa opzione **Hoop viene esclusa dall'inferenza e la ricerca automatica v
 saltata**. Il rettangolo resta fisso per tutta la partita: usa una telecamera fissa.
 Le immagini debug mostrano il riferimento come `manuale`, senza inventare una confidenza.
 
-## Tracker della palla e interpolazione
+## Tracker della palla: Kalman, memoria e interpolazione
 
 I giocatori mantengono il loro ByteTrack standard e la soglia `--confidence 0.1`.
 Gli ID sono locali al video; occlusioni e incroci possono modificarli. Arbitri e
@@ -216,35 +217,60 @@ Il tracker segue **una sola palla principale**:
   vicini in due frame elaborati consecutivi. In entrambi i casi il candidato deve
   trovarsi **vicino a un giocatore** (dentro il suo box allargato della sua altezza);
   i box alti più del doppio della mediana, cioè il pubblico, non contano.
-- **Previsione:** stima la velocità dalle ultime osservazioni e prevede dove sarà la
-  palla. Accetta il candidato più vicino alla previsione, entro una finestra di
-  `max(30, 4 × lato della palla)` pixel più **10 pixel per ogni frame trascorso**.
+- **Filtro di Kalman:** il moto della palla è modellato con stato posizione, velocità e
+  accelerazione (classe `KalmanPalla`, accelerazione costante con rumore di jerk). Ogni
+  rilevamento YOLO accettato aggiorna il filtro; in ogni frame elaborato il filtro
+  prevede dove sarà la palla.
+- **Associazione:** accetta il candidato più vicino alla previsione se rientra nella
+  finestra minima `max(30, 4 × lato della palla, 1.5 × spostamento previsto)` pixel,
+  oppure se la distanza di Mahalanobis rispetto all'incertezza del filtro è entro il 99%
+  (chi-quadro 9.21) e non supera la finestra che si allarga di 15 pixel per frame perso.
   Anche un candidato a 0.05 viene accettato se è nella finestra, anche lontano dai
-  giocatori (passaggi e tiri).
-- **Cambio di traccia:** un candidato fuori dalla finestra con almeno 0.15, vicino a un
-  giocatore, sostituisce la traccia se è più sicuro di 0.2 rispetto al migliore vicino
-  (o se non ci sono vicini). Il tracker non resta mai bloccato su una posizione vecchia.
-- **Perdita:** dopo **1 secondo** (calcolato sugli FPS reali del video) senza palla la
-  traccia termina; la successiva riparte da qualsiasi punto del campo con un nuovo `id`.
+  giocatori (passaggi e tiri). Non si usa la sovrapposizione dei box, come fanno
+  ByteTrack e BoT-SORT: una palla di 12 pixel veloce non si sovrappone quasi mai al frame
+  precedente.
+- **Memoria lunga e ri-associazione (idea di OC-SORT):** l'`id` resta in memoria per
+  **5 secondi (150 frame a 30 FPS)** senza osservazioni. Se in quel tempo ricompare un
+  candidato di almeno 0.15 vicino a un giocatore, anche lontano dalla previsione (passaggio
+  lungo, uscita da un'occlusione), è la stessa palla: **stesso `id`**, e il filtro riparte
+  da quella posizione. Lo stesso vale se un candidato lontano è più sicuro di 0.2 rispetto
+  al migliore vicino. Solo dopo 150 frame senza palla l'`id` successivo è nuovo.
 - **Punti statici:** se YOLO vede una "palla" nello stesso punto per almeno 10 frame
   distribuiti su almeno 1 secondo (un logo, un murale, una palla ferma a bordo campo),
   i candidati in quel punto vengono ignorati finché non smette di comparire per 10
   secondi. Il prezzo: una palla tenuta ferma a lungo, per esempio prima di un tiro
   libero, si perde finché non si muove.
 
-L'`id` della palla identifica la continuità della traccia principale. Per compatibilità
-il JSON contiene ancora `tracker_id`, ora uguale a `id` per le osservazioni YOLO.
+L'`id` della palla identifica la continuità della palla principale. Per compatibilità
+il JSON contiene ancora `tracker_id`, uguale a `id` per le osservazioni YOLO.
 
-Per buchi di **1–5 frame originali**, due osservazioni YOLO accettate della stessa
-traccia permettono un'interpolazione lineare dei quattro angoli del box. La
-scrittura del video attende fino a sei frame: così il cerchio, il JSON e il possesso
-usano tutti la stessa posizione ricostruita. L'etichetta diventa `PALLA INTERPOLATA`
-e il JSON usa `source: "interpolated"`. Con `--skip-frames`, vengono ricostruiti
-solo i frame che verranno effettivamente salvati.
+### Stima, interpolazione e occlusioni
 
-Non vengono inventate posizioni all'inizio, alla fine o nei buchi superiori a
-cinque frame. Le posizioni previste senza osservazione non vengono esportate
-come rilevamenti. Se la palla non viene trovata, l'analisi continua senza errori.
+Nei frame in cui YOLO non vede la palla:
+
+- **Interpolazione (1–29 frame persi):** se la palla riappare entro 29 frame originali
+  con lo stesso `id`, i frame mancanti vengono riempiti con un'interpolazione lineare
+  fra l'ultima e la nuova osservazione. È la stima migliore, perché conosce anche il
+  punto di arrivo. Etichetta `PALLA INTERPOLATA`, JSON `source: "interpolated"`.
+- **Predizione di Kalman (fino a 30 frame):** se la palla non riappare in tempo, la
+  posizione è quella prevista dal filtro. Senza osservazioni l'accelerazione stimata
+  viene azzerata e la velocità ridotta del 30% per frame: una palla che sparisce è quasi
+  sempre nascosta da un giocatore vicino all'ultima posizione vista, e una stima che
+  prosegue in linea retta finirebbe presto fuori dal campo. La stima resta dentro
+  l'immagine. Etichetta `PALLA STIMATA`, JSON `source: "predicted"`.
+- **Oltre 30 frame** la palla non viene più disegnata né esportata, ma l'`id` resta in
+  memoria fino a 150 frame.
+
+Le posizioni stimate hanno un **cerchio arancione tratteggiato** e `"estimated": true` nel
+JSON; i rilevamenti YOLO hanno il cerchio rosso pieno e `"estimated": false`. Per sapere se
+la palla riappare entro 29 frame, la scrittura del video attende fino a 30 frame
+originali (circa un secondo): così cerchio, JSON e possesso usano la stessa posizione.
+Con `--skip-frames` vengono stimati solo i frame che verranno effettivamente salvati.
+
+Le stime aiutano a leggere il video e il possesso, ma **non vengono usate per confermare
+tiri o canestri**. Sono ipotesi: quando la palla resta nascosta a lungo, la stima può
+trovarsi su un giocatore diverso da quello che ha davvero la palla. A fine video non
+vengono interpolati i buchi finali (manca il punto di arrivo), ma la predizione sì.
 
 ### Risoluzione di inferenza
 
@@ -323,8 +349,8 @@ in corso alla volta. Se la palla scompare per oltre un secondo, il candidato dur
 oltre tre secondi o il video termina durante il tiro, l'esito resta non osservabile.
 Anche un'occlusione nel passaggio al ferro impedisce la conferma. Questi candidati
 sono contati nel terminale ed esclusi dal JSON booleano, senza inventare un errore
-al tiro. Le posizioni `interpolated` non vengono usate per confermare tiri o canestri: un
-attraversamento stimato non dimostra un canestro. Con frame saltati le velocità sono
+al tiro. Le posizioni `interpolated` e `predicted` non vengono usate per confermare tiri o
+canestri: un attraversamento stimato non dimostra un canestro. Con frame saltati le velocità sono
 normalizzate per l'intervallo originale. Se il rettangolo del canestro cambia durante
 un tiro, l'evento viene chiuso come non classificabile per evitare esiti basati su
 due riferimenti diversi.
@@ -352,17 +378,19 @@ fra loro e dagli altri file dell'analisi.
 
 ```json
 [
-  {"frame": 0, "id": 1, "tracker_id": 1, "bbox": [300,180,320,200], "confidence": 0.82, "source": "yolo"},
-  {"frame": 1, "id": 1, "tracker_id": null, "bbox": [310,190,330,210], "confidence": 0.75, "source": "interpolated"},
-  {"frame": 2, "id": 1, "tracker_id": 1, "bbox": [320,200,340,220], "confidence": 0.75, "source": "yolo"}
+  {"frame": 0, "id": 1, "tracker_id": 1, "bbox": [300,180,320,200], "confidence": 0.82, "source": "yolo", "estimated": false},
+  {"frame": 1, "id": 1, "tracker_id": null, "bbox": [310,190,330,210], "confidence": 0.75, "source": "interpolated", "estimated": true},
+  {"frame": 2, "id": 1, "tracker_id": 1, "bbox": [320,200,340,220], "confidence": 0.75, "source": "yolo", "estimated": false},
+  {"frame": 3, "id": 1, "tracker_id": null, "bbox": [327,207,347,227], "confidence": 0.0, "source": "predicted", "estimated": true}
 ]
 ```
 
 Per `yolo`, la confidenza è quella dell'osservazione. Per `interpolated` è il minimo
 fra le confidenze dei due estremi: **non è una nuova probabilità misurata**. Per
-`color`, possibile solo se attivato, vale `0.0` e sia `id` sia `tracker_id` sono `null`.
+`predicted` vale `0.0`, perché non c'è nessuna misura. Per `color`, possibile solo se
+attivato, vale `0.0`, `estimated` è `false` e sia `id` sia `tracker_id` sono `null`.
 I box possono contenere coordinate decimali, soprattutto dopo l'interpolazione.
-Nessun record viene aggiunto per un frame senza osservazione né interpolazione valida.
+Nessun record viene aggiunto per un frame senza osservazione, interpolazione o stima valida.
 
 `possession.json`, esattamente un record per frame elaborato (con indici originali):
 
@@ -408,7 +436,7 @@ python -m unittest discover -s scripts -p "test_*.py" -v
 
 I test usano ByteTrack reale (giocatori) con rilevamenti YOLO controllati. Coprono inferenza
 unica, esclusione delle classi estranee, soglie basse, filtro dimensionale, previsione
-della palla, finestra di ricerca, punti statici, ripartenza dopo una perdita, interpolazione e assenza del punto
+della palla, filtro di Kalman, memoria dell'ID per 150 frame, stima entro 30 frame, punti statici, interpolazione e assenza del punto
 futuro, video/JSON coerenti, canestro oltre il frame 300, aggiornamenti periodici,
 modalità manuale, candidati sotto soglia nel debug e frame saltati. Il modello
 reale `best.pt` è verificato separatamente su una clip dimostrativa; per misurare
